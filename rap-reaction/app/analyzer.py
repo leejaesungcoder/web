@@ -81,7 +81,7 @@ SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 �
 - 유튜브 반응에 영향을 주는 구조를 본다: 인트로가 길면(15초 이상) 초반 이탈과 "인트로 스킵" 댓글이 늘어난다. 첫 훅이 늦게(1분 이후) 나오면 일반 청자를 잃는다. 훅이 반복되는 횟수와 에너지 차이는 중독성과 관련 있다. 곡 길이가 짧으면(2분대) 반복 재생에 유리하다.
 - 저음 비중이 높고 BPM이 130~160(하프타임 65~80)이면 트랩 계열, 85~100이면서 타악기 비중이 높으면 붐뱁 계열일 가능성이 높다. 단정하지 말고 "~로 보인다"고 말한다. 사용자가 적은 비트 설명이 있으면 그쪽을 우선한다.
 - 유튜브에는 "1:23 여기 미쳤다" 같은 타임스탬프 댓글이 많다. key_moments는 반드시 음원 분석에 나온 실제 시점(구간 시작, 에너지 상승, 훅 후보)에서 고른다. 없는 시점을 지어내지 않는다.
-- 자동 받아쓰기 가사가 주어지면 오인식이 많다는 점을 감안한다. 확실하지 않은 구절은 인용하지 않는다."""
+"""
 
 
 def _audio_summary(audio: dict) -> dict:
@@ -127,7 +127,6 @@ def _build_user_message(
     features: dict | None,
     references: list[dict],
     audio: dict | None = None,
-    transcript: list[dict] | None = None,
 ) -> str:
     parts = ["다음 곡이 공개됐을 때의 청자 반응, 특히 유튜브 댓글 반응을 예측해줘.\n"]
     meta = {
@@ -159,12 +158,6 @@ def _build_user_message(
         )
     if lyrics:
         parts.append("<가사>\n" + lyrics.strip() + "\n</가사>")
-    elif transcript:
-        parts.append(
-            "<자동_받아쓰기_가사>\n음성 인식 결과라 오인식이 많다. 앞의 시간은 해당 구절이 시작되는 시점이다.\n"
-            + "\n".join(f"[{s['time']}] {s['text']}" for s in transcript)
-            + "\n</자동_받아쓰기_가사>"
-        )
     else:
         parts.append(
             "<가사>\n(가사 없음. 음원 구조만으로 판단하고, 가사 관련 항목은 비워두거나 "
@@ -189,18 +182,15 @@ def analyze(
     artist_level: str | None = None,
     vibe: str | None = None,
     audio: dict | None = None,
-    transcript: list[dict] | None = None,
 ) -> dict:
     if not lyrics and not audio:
         raise ValueError("가사나 음원 중 하나는 있어야 합니다.")
 
-    lyric_text = lyrics or ("\n".join(s["text"] for s in transcript) if transcript else None)
-    features = extract_features(lyric_text) if lyric_text else None
+    features = extract_features(lyrics) if lyrics else None
     references = sample_reference_comments()
     common = {
         "features": features,
         "audio": audio,
-        "transcript": transcript,
         "reference_count": len(references),
     }
 
@@ -209,7 +199,7 @@ def analyze(
 
     client = anthropic.Anthropic()
     user_message = _build_user_message(
-        lyrics, title, artist_level, vibe, features, references, audio, transcript
+        lyrics, title, artist_level, vibe, features, references, audio
     )
 
     # 스트리밍으로 받아 타임아웃을 피하고, 완성된 메시지만 사용한다.

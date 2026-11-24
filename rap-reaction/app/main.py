@@ -1,29 +1,102 @@
-"""웹 서버: 정적 페이지 + 분석 API."""
+"""웹 서버: 정적 페이지 + 분석 API.
+
+음원은 브라우저에서 분석하고(static/audio-analyzer.js), 서버는 그 수치와 가사를 받아 Claude에 넘긴다.
+그래서 음원 파일은 서버로 올라오지 않는다.
+"""
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Optional
 
 import anthropic
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
 
-from . import guard, transcribe
+from . import guard
 from .analyzer import AnalysisRefused, analyze, has_api_key
-from .audio_features import analyze_audio
 from .references import dataset_stats
 
 STATIC = Path(__file__).resolve().parent / "static"
-MAX_AUDIO_BYTES = 40 * 1024 * 1024
-AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm"}
+TIME = r"^\d{1,2}:\d{2}$"
 
 app = FastAPI(title="Rap Reaction", docs_url=None, redoc_url=None, openapi_url=None)
 
+
+# ---------- 브라우저가 보내는 음원 분석 결과 (신뢰하지 않고 형식을 검증한다) ----------
+
+class Section(BaseModel):
+    start: str = Field(pattern=TIME)
+    end: str = Field(pattern=TIME)
+    start_seconds: float = Field(ge=0, le=3600)
+    end_seconds: float = Field(ge=0, le=3600)
+    label: str = Field(pattern=r"^[A-Z?]$")
+    energy: float = Field(ge=0, le=1.5)
+
+
+class EnergyRise(BaseModel):
+    seconds: float = Field(ge=0, le=3600)
+    time: str = Field(pattern=TIME)
+    energy_jump: float = Field(ge=-2, le=2)
+
+
+class HookCandidate(BaseModel):
+    label: str = Field(pattern=r"^[A-Z?]$")
+    occurrences: int = Field(ge=0, le=100)
+    first_at: str = Field(pattern=TIME)
+    first_at_seconds: float = Field(ge=0, le=3600)
+
+
+class AudioFeatures(BaseModel):
+    duration: str = Field(pattern=TIME)
+    duration_seconds: float = Field(gt=0, le=3600)
+    bpm: float = Field(ge=0, le=400)
+    bpm_note: Optional[str] = None  # 서버에서 다시 만든다
+    key: str = Field(pattern=r"^[A-G]#? (major|minor)$")
+    loudness_db: Optional[float] = Field(default=None, ge=-200, le=50)
+    dynamic_range_db: Optional[float] = Field(default=None, ge=0, le=200)
+    bass_ratio: float = Field(ge=0, le=1)
+    high_freq_ratio: float = Field(ge=0, le=1)
+    brightness_hz: float = Field(ge=0, le=20000)
+    percussive_ratio: float = Field(ge=0, le=1)
+    onsets_per_second: float = Field(ge=0, le=100)
+    intro_seconds: float = Field(ge=0, le=3600)
+    energy_rises: list[EnergyRise] = Field(max_length=6)
+    sections: list[Section] = Field(max_length=40)
+    hook_candidate: Optional[HookCandidate] = None
+    energy_curve: list[float] = Field(max_length=400)
+    energy_curve_step_seconds: int = Field(ge=1, le=10)
+
+    @field_validator("energy_curve")
+    @classmethod
+    def _curve_range(cls, v: list[float]) -> list[float]:
+        if any(not (0 <= x <= 1.5) for x in v):
+            raise ValueError("energy_curve 값은 0~1.5 사이여야 합니다")
+        return v
+
+    def to_dict(self) -> dict:
+        d = self.model_dump()
+        bpm = d["bpm"]
+        d["bpm_note"] = (
+            f"하프타임으로 느끼면 약 {bpm / 2:.0f} BPM" if bpm >= 120
+            else f"더블타임으로 느끼면 약 {bpm * 2:.0f} BPM" if bpm <= 85
+            else None
+        )
+        return d
+
+
+class AnalyzeRequest(BaseModel):
+    lyrics: Optional[str] = Field(default=None, max_length=20000)
+    title: Optional[str] = Field(default=None, max_length=200)
+    artist_level: Optional[str] = Field(default=None, max_length=50)
+    vibe: Optional[str] = Field(default=None, max_length=500)
+    audio: Optional[AudioFeatures] = None
+
+
+# ---------- 라우트 ----------
 
 @app.get("/")
 def index():
@@ -40,80 +113,32 @@ def status():
     return {
         "live": has_api_key(),
         "access_required": bool(guard.ACCESS_CODE),
-        "transcription": transcribe.available(),
         "dataset": dataset_stats(),
     }
 
 
-async def _save_upload(upload: UploadFile) -> str:
-    ext = Path(upload.filename or "").suffix.lower()
-    if ext not in AUDIO_EXTS:
-        raise HTTPException(400, f"지원하지 않는 파일 형식입니다. ({', '.join(sorted(AUDIO_EXTS))})")
-    fd, path = tempfile.mkstemp(suffix=ext)
-    size = 0
-    with os.fdopen(fd, "wb") as f:
-        while chunk := await upload.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_AUDIO_BYTES:
-                f.close()
-                os.unlink(path)
-                raise HTTPException(413, "음원 파일은 40MB까지 올릴 수 있습니다.")
-            f.write(chunk)
-    return path
-
-
-def _clean(value: Optional[str], limit: int) -> Optional[str]:
+def _clean(value: Optional[str]) -> Optional[str]:
     value = (value or "").strip()
-    return value[:limit] or None
+    return value or None
 
 
 @app.post("/api/analyze")
-async def analyze_endpoint(
-    request: Request,
-    lyrics: Optional[str] = Form(None),
-    title: Optional[str] = Form(None),
-    artist_level: Optional[str] = Form(None),
-    vibe: Optional[str] = Form(None),
-    audio: Optional[UploadFile] = File(None),
-):
+async def analyze_endpoint(req: AnalyzeRequest, request: Request):
     guard.check_access(request)
-    lyrics = _clean(lyrics, 20000)
-    has_audio = audio is not None and bool(audio.filename)
-    if not has_audio and (not lyrics or len(lyrics) < 20):
+    lyrics = _clean(req.lyrics)
+    if not req.audio and (not lyrics or len(lyrics) < 20):
         raise HTTPException(400, "가사(20자 이상)나 음원 중 하나는 넣어 주세요.")
     guard.check_rate(request)
-
-    audio_info = None
-    transcript = None
-    if has_audio:
-        path = await _save_upload(audio)
-        try:
-            try:
-                async with guard.audio_slot:
-                    audio_info = await run_in_threadpool(analyze_audio, path)
-            except ValueError as e:
-                raise HTTPException(400, str(e))
-            except Exception:
-                raise HTTPException(400, "음원을 읽지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.")
-            if not lyrics and transcribe.available():
-                try:
-                    async with guard.audio_slot:
-                        transcript = await run_in_threadpool(transcribe.transcribe, path)
-                except Exception:
-                    transcript = None  # 받아쓰기 실패해도 음원 구조만으로 분석을 계속한다
-        finally:
-            os.unlink(path)
 
     try:
         async with guard.claude_slot:
             return await run_in_threadpool(
                 analyze,
                 lyrics,
-                _clean(title, 200),
-                _clean(artist_level, 50),
-                _clean(vibe, 500),
-                audio_info,
-                transcript,
+                _clean(req.title),
+                _clean(req.artist_level),
+                _clean(req.vibe),
+                req.audio.to_dict() if req.audio else None,
             )
     except AnalysisRefused as e:
         raise HTTPException(422, str(e))

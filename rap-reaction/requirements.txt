@@ -1,7 +1,3 @@
 anthropic>=2.13.0
 fastapi>=0.165.0
 uvicorn>=0.54.0
-python-multipart>=0.0.20
-librosa>=0.11.0
-# 선택: 음원만 넣었을 때 가사 자동 받아쓰기 (모델 약 500MB 다운로드)
-# faster-whisper>=1.1.0

@@ -134,13 +134,13 @@
       </select>
       <label for="vibe">비트 / 분위기 (선택)</label>
       <input id="vibe" maxlength="500" placeholder="예: 붐뱁, 90BPM, 재지한 샘플">
-      <label for="audio">음원 파일 (선택, 40MB까지)</label>
+      <label for="audio">음원 파일 (선택)</label>
       <input id="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm,audio/*">
-      <div class="hint" id="audio-hint">mp3, wav, m4a 등. 넣으면 인트로 길이, 훅 타이밍, 비트 성격까지 반영합니다.</div>
+      <div class="hint">mp3, wav, m4a 등. 넣으면 인트로 길이, 훅 타이밍, 비트 성격까지 반영합니다. 음원만 넣으면 가사 없이 곡 구조만으로 분석합니다.</div>
       <label for="lyrics">가사 <span class="hint-inline">(음원이 있으면 생략 가능, 하지만 넣는 게 훨씬 정확합니다)</span></label>
       <textarea id="lyrics" placeholder="[Verse 1]&#10;가사를 줄 단위로 붙여넣으세요&#10;&#10;[Hook]&#10;…"></textarea>
       <button id="submit" type="submit">반응 예측하기</button>
-      <p class="privacy">업로드한 음원은 분석이 끝나면 바로 서버에서 삭제되고 저장하지 않습니다. 가사와 음원 분석 수치는 반응 예측을 위해 Anthropic의 Claude API로 전송됩니다.</p>
+      <p class="privacy"><b>음원 파일은 업로드되지 않습니다.</b> 이 브라우저 안에서 분석하고, BPM·구간 구조 같은 수치만 서버로 보냅니다. 가사와 이 수치는 반응 예측을 위해 Anthropic의 Claude API로 전송됩니다.</p>
     </form>
 
     <section class="card" id="result" aria-live="polite">
@@ -171,11 +171,74 @@ fetch("/api/status").then(r => r.json()).then(s => {
   const mode = s.live ? "실제 분석 (Claude API 연결됨)" : "데모 모드 (ANTHROPIC_API_KEY 없음)";
   $("#status").replaceChildren(
     "모드: ", el("b", {}, mode),
-    ` · 참고 댓글 데이터: ${s.dataset.comment_count.toLocaleString()}개 / 영상 ${s.dataset.video_count}개`,
-    ` · 가사 받아쓰기: ${s.transcription ? "사용 가능" : "꺼짐"}`
+    ` · 참고 댓글 데이터: ${s.dataset.comment_count.toLocaleString()}개 / 영상 ${s.dataset.video_count}개`
   );
-  if (!s.transcription) $("#audio-hint").textContent += " 받아쓰기가 꺼져 있어서, 음원만 넣으면 가사 없이 곡 구조만으로 분석합니다.";
 }).catch(() => { $("#status").textContent = "서버 상태를 확인하지 못했습니다."; });
+
+// ---------- 브라우저 안에서 음원 분석 ----------
+const TARGET_SR = 16000, MAX_SECONDS = 420;
+let cachedAudio = { key: null, features: null };
+
+// 파일을 디코딩해서 16kHz 모노로 바꾼다 (ffmpeg -ac 1 -ar 16000 과 같은 역할)
+async function decodeTo16k(file) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC || !window.OfflineAudioContext) throw new Error("이 브라우저는 음원 분석을 지원하지 않습니다. 최신 Chrome, Safari, Edge를 써 주세요.");
+  const ctx = new AC();
+  let audio;
+  try {
+    audio = await ctx.decodeAudioData(await file.arrayBuffer());
+  } catch {
+    throw new Error("음원을 읽지 못했습니다. mp3, wav, m4a 파일인지, 손상되지 않았는지 확인해 주세요.");
+  } finally {
+    ctx.close && ctx.close();
+  }
+  const seconds = Math.min(audio.duration, MAX_SECONDS);
+  try {
+    const off = new OfflineAudioContext(1, Math.ceil(seconds * TARGET_SR), TARGET_SR);
+    const src = off.createBufferSource();
+    src.buffer = audio; src.connect(off.destination); src.start();
+    return (await off.startRendering()).getChannelData(0);
+  } catch {
+    // 16kHz 렌더링을 지원하지 않는 브라우저: 원래 샘플레이트로 모노 믹스 후 직접 줄인다
+    const n = Math.ceil(seconds * audio.sampleRate), ch = audio.numberOfChannels;
+    const mono = new Float32Array(n);
+    for (let c = 0; c < ch; c++) {
+      const d = audio.getChannelData(c);
+      for (let i = 0; i < n; i++) mono[i] += d[i] / ch;
+    }
+    const ratio = audio.sampleRate / TARGET_SR, out = new Float32Array(Math.floor(n / ratio));
+    for (let i = 0; i < out.length; i++) {
+      const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio));
+      let s = 0;
+      for (let j = a; j < b && j < n; j++) s += mono[j];
+      out[i] = s / (b - a);
+    }
+    return out;
+  }
+}
+
+function runWorker(samples, onProgress) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker("/static/audio-worker.js");
+    w.onmessage = (e) => {
+      if (e.data.type === "progress") onProgress(e.data.p);
+      else { w.terminate(); e.data.type === "done" ? resolve(e.data.result) : reject(new Error(e.data.message)); }
+    };
+    w.onerror = (e) => { w.terminate(); reject(new Error("음원 분석 중 오류가 났습니다: " + (e.message || ""))); };
+    const copy = samples.slice();
+    w.postMessage({ samples: copy.buffer }, [copy.buffer]);
+  });
+}
+
+async function analyzeFile(file, say) {
+  const key = [file.name, file.size, file.lastModified].join("|");
+  if (cachedAudio.key === key) return cachedAudio.features;
+  say("음원을 불러오는 중… (파일은 업로드되지 않아요)");
+  const samples = await decodeTo16k(file);
+  const features = await runWorker(samples, (p) => say(`브라우저에서 음원 분석 중… ${Math.round(p * 100)}%`));
+  cachedAudio = { key, features };
+  return features;
+}
 
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -187,18 +250,17 @@ $("#form").addEventListener("submit", async (e) => {
   }
   const btn = $("#submit");
   btn.disabled = true; btn.textContent = "분석 중…";
-  $("#result").replaceChildren(el("div", { class: "empty" },
-    file ? "음원을 분석하고 반응을 예측하는 중입니다… (1분 정도 걸릴 수 있어요)" : "청자 반응을 예측하는 중입니다…"));
+  const say = (msg) => $("#result").replaceChildren(el("div", { class: "empty" }, msg));
   try {
-    const form = new FormData();
-    if (lyrics) form.append("lyrics", lyrics);
-    if (file) form.append("audio", file);
-    for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"]]) {
-      if ($(id).value) form.append(k, $(id).value);
-    }
+    const audio = file ? await analyzeFile(file, say) : null;
+    say("청자 반응을 예측하는 중입니다… (30초~1분)");
+    const body = { lyrics: lyrics || null, audio };
+    for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"]]) body[k] = $(id).value || null;
     const code = $("#code").value.trim();
     if (code) store.set("rr-access-code", code);
-    const res = await fetch("/api/analyze", { method: "POST", body: form, headers: code ? { "X-Access-Code": code } : {} });
+    const headers = { "Content-Type": "application/json" };
+    if (code) headers["X-Access-Code"] = code;
+    const res = await fetch("/api/analyze", { method: "POST", body: JSON.stringify(body), headers });
     if (res.status === 401) { $("#code-wrap").hidden = false; $("#code").focus(); }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "요청을 처리하지 못했습니다.");
@@ -327,7 +389,7 @@ function render(data) {
     lineList(r.weak_lines, "lo"),
     bullets("논란 소지", r.risks),
 
-    f ? el("h2", {}, data.transcript ? "가사 지표 (자동 받아쓰기 기준)" : "가사 지표 (자동 계산)") : null,
+    f ? el("h2", {}, "가사 지표 (자동 계산)") : null,
     f ? el("div", { class: "feat" },
       el("div", {}, el("b", {}, f.line_count), "줄 수"),
       el("div", {}, el("b", {}, pct(f.end_rhyme_ratio)), "끝 라임 일치율"),
@@ -335,8 +397,6 @@ function render(data) {
       el("div", {}, el("b", {}, pct(f.english_ratio)), "영어 비율"),
       el("div", {}, el("b", {}, f.avg_syllables_per_line), "줄당 평균 음절"),
       el("div", {}, el("b", {}, f.repeated_lines.length), "반복 구절(훅 후보)")) : null,
-    data.transcript ? el("details", {}, el("summary", {}, "자동 받아쓰기 결과 보기 (오인식 많음)"),
-      el("pre", {}, data.transcript.map(s => `[${s.time}] ${s.text}`).join("\n"))) : null,
 
     el("p", { class: "caveat" }, r.caveats +
       (data.reference_count ? ` · 실제 유튜브 댓글 ${data.reference_count}개를 말투 참고로 사용했습니다.` : "")),
