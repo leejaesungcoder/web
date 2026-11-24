@@ -1,3 +1,14 @@
+---
+title: Rap Reaction
+emoji: 🎤
+colorFrom: red
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: 가사와 음원으로 힙합 청자 반응을 예측합니다
+---
+
 # Rap Reaction
 
 래퍼가 발매 전 가사나 음원을 넣으면, 곡이 공개됐을 때 **평론가 / 힙합 커뮤니티 / 일반 유튜브 청자**가 어떻게 반응할지 예측하는 웹앱입니다.
@@ -27,7 +38,7 @@ Claude는 오디오를 직접 듣지 못합니다. 서버에서 [librosa](https:
 | 에너지 상승 순간 | 4초 사이 에너지가 크게 오르는 시점 (드롭, 훅 진입) |
 | 저음 비중 | 150Hz 미만 에너지 비율 (808 강도) |
 
-3분짜리 곡 분석에 약 5~10초 걸립니다. 서버에 ffmpeg가 있어야 mp3/m4a를 읽을 수 있습니다.
+3~4분짜리 곡 분석에 약 4~8초 걸립니다. 7분이 넘는 음원은 앞 7분만 분석합니다. 서버에 ffmpeg가 있어야 mp3/m4a를 읽을 수 있습니다.
 
 **가사 자동 받아쓰기 (선택):** `pip install faster-whisper`를 설치하면, 가사 없이 음원만 넣었을 때 받아쓰기를 시도합니다. 처음 실행할 때 Hugging Face에서 모델(약 500MB)을 내려받습니다. 랩은 받아쓰기 정확도가 낮아서 가사를 직접 넣는 쪽이 훨씬 정확합니다. 설치하지 않으면 음원만 넣었을 때 곡 구조만으로 분석합니다.
 
@@ -41,6 +52,37 @@ uvicorn app.main:app --reload
 ```
 
 브라우저에서 http://localhost:8000 을 엽니다.
+
+## 웹에 배포하기 (Hugging Face Spaces, 무료)
+
+음원 분석에 메모리가 약 500~600MB 필요해서, 메모리 512MB인 무료 호스팅(Render 등)에서는 꺼질 수 있습니다. Hugging Face Spaces 무료 CPU는 메모리가 16GB라 여유 있게 돌아갑니다. 48시간 동안 접속이 없으면 잠들고, 다음 접속 때 1~2분 정도 걸려 다시 켜집니다.
+
+1. [huggingface.co](https://huggingface.co) 가입 → 오른쪽 위 **New Space**
+2. Space name `rap-reaction`, SDK는 **Docker → Blank**, 하드웨어 **CPU basic (Free)**, 공개 여부 **Public** 선택 후 생성
+   (Private로 만들면 앱을 쓰려는 사람도 Hugging Face 로그인과 권한이 필요합니다.)
+3. Space의 **Settings → Variables and secrets**에서 추가:
+
+   | 종류 | 이름 | 값 |
+   |---|---|---|
+   | Secret | `ANTHROPIC_API_KEY` | Claude API 키 |
+   | Secret | `APP_ACCESS_CODE` | (선택) 베타 테스터에게만 알려줄 접속 코드 |
+   | Variable | `RATE_LIMIT_PER_HOUR` | (선택) IP당 시간당 분석 횟수, 기본 10 |
+   | Variable | `DAILY_LIMIT` | (선택) 하루 전체 분석 횟수, 기본 200 |
+
+4. 코드 올리기. 둘 중 하나:
+   - **직접 업로드:** Space의 **Files → Add file → Upload files**에 `rap-reaction` 폴더 **안의** 파일과 폴더를 전부 끌어다 놓습니다 (`README.md`, `Dockerfile`, `requirements.txt`, `app/`, `collector/`가 Space 최상위에 오도록).
+   - **GitHub에서 자동 배포:** [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)에서 Write 토큰을 만들고, GitHub 저장소 **Settings → Secrets and variables → Actions**에 Secret `HF_TOKEN`(토큰), Variable `HF_SPACE`(예: `내아이디/rap-reaction`)를 넣습니다. 그다음 **Actions → Deploy Rap Reaction to Hugging Face → Run workflow**를 누르면 배포되고, 이후 main 브랜치에 `rap-reaction/`이 바뀔 때마다 자동으로 다시 배포됩니다.
+5. 빌드가 끝나면(5분 정도) `https://huggingface.co/spaces/내아이디/rap-reaction`에서 앱이 열립니다. 이 주소를 래퍼들에게 공유하면 됩니다.
+
+같은 `Dockerfile`로 Fly.io, Railway 같은 다른 호스팅에도 올릴 수 있습니다. 메모리는 1GB 이상으로 잡으세요.
+
+### 공개 배포 시 보호 장치
+
+- **요금 보호:** IP당 시간당 10회, 하루 전체 200회로 분석을 제한합니다 (환경 변수로 조절). 접속 코드를 설정하면 코드를 아는 사람만 쓸 수 있습니다. Anthropic 콘솔에서 월 사용 한도도 함께 걸어 두는 것을 권장합니다.
+- **미발매곡 보호:** 업로드한 음원은 분석 직후 서버에서 삭제하고 저장하지 않습니다. 가사와 분석 수치는 Claude API로 전송되며, 화면에 이 내용을 안내합니다.
+- **메모리 보호:** 음원 분석은 한 번에 하나씩, Claude 호출은 동시에 4개까지만 실행합니다.
+- 서버를 재시작하면 횟수 제한 기록은 초기화됩니다.
+- 수집한 유튜브 댓글(`data/`)은 배포에 포함되지 않습니다. 배포된 앱은 참고 댓글 없이 분석합니다.
 
 ## 유튜브 댓글 수집
 
@@ -76,7 +118,9 @@ python -m collector.youtube_comments --video https://youtu.be/VIDEO_ID --max-com
 
 ```
 app/
-  main.py             FastAPI 서버 (/api/analyze, /api/status)
+  main.py             FastAPI 서버 (/api/analyze, /api/status, /healthz)
+  guard.py            접속 코드, 횟수 제한, 동시 실행 제한
+  warmup.py           Docker 빌드 시 분석 코드 미리 컴파일
   analyzer.py         Claude 호출, 출력 스키마, 프롬프트, 데모 모드
   lyrics_features.py  라임/어휘/영어 비율 등 정량 지표
   audio_features.py   음원 분석 (BPM, 구간, 훅, 에너지 흐름)
@@ -87,6 +131,7 @@ collector/
   youtube_comments.py 유튜브 댓글 수집기
   seed_queries.txt    기본 검색어
 data/                 수집 데이터 (git 제외)
+Dockerfile            배포용 이미지
 ```
 
 ## 다음 단계

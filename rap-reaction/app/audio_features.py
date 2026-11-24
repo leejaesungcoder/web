@@ -6,12 +6,29 @@ Claude는 오디오를 직접 듣지 못하므로, 여기서 계산한 수치와
 
 from __future__ import annotations
 
+import subprocess
+
 import numpy as np
 import librosa
 
-SR = 22050
+# 무료 호스팅(메모리 512MB)에서도 돌아가도록 16kHz 모노로 분석한다.
+SR = 16000
 HOP = 512
-MAX_SECONDS = 600  # 10분 넘는 음원은 앞부분만 분석
+N_FFT = 1024
+MAX_SECONDS = 420  # 7분 넘는 음원은 앞부분만 분석
+HPSS_MAX_HZ = 4000  # 타악기/화성 분리는 이 주파수 아래에서만 (메모리 절약)
+
+
+def load_audio(path: str) -> np.ndarray:
+    """ffmpeg로 바로 16kHz 모노 float32로 디코딩한다 (librosa.load보다 메모리를 훨씬 적게 씀)."""
+    cmd = [
+        "ffmpeg", "-nostdin", "-v", "error", "-i", path, "-t", str(MAX_SECONDS),
+        "-ac", "1", "-ar", str(SR), "-f", "f32le", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.decode("utf-8", "replace")[-300:])
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
 
 # Krumhansl-Kessler 조성 프로파일
 _MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -61,38 +78,57 @@ def _label_repeats(seg_vecs: list[np.ndarray], threshold: float = 0.92) -> list[
 
 
 def analyze_audio(path: str) -> dict:
-    y, sr = librosa.load(path, sr=SR, mono=True, duration=MAX_SECONDS)
+    y, sr = load_audio(path), SR
     if y.size < sr * 5:
         raise ValueError("음원이 너무 짧습니다 (5초 미만).")
     duration = y.size / sr
 
+    # 스펙트로그램은 한 번만 계산해서 모든 특징에 같이 쓴다 (메모리 절약).
+    # 템포 추정은 촘촘한 간격(16ms)이 필요해서 HOP/2로 계산하고, 나머지는 한 칸씩 건너뛰어 쓴다.
+    fine_hop = HOP // 2
+    mag_fine = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=fine_hop))
+    mel_fine = librosa.feature.melspectrogram(S=mag_fine ** 2, sr=sr, n_mels=64)
+
     # 템포 / 박자
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP)
-    tempo, _beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr, hop_length=HOP)
+    onset_env = librosa.onset.onset_strength(S=librosa.power_to_db(mel_fine), sr=sr, hop_length=fine_hop)
+    # 템포는 곡 중간 90초 구간에서만 추정한다. 곡 전체로 하면 메모리를 수백 MB 더 쓴다.
+    win = int(90 * sr / fine_hop)
+    start = max(0, min(len(onset_env) - win, int(len(onset_env) * 0.25)))
+    tempo = librosa.feature.tempo(onset_envelope=onset_env[start:start + win], sr=sr, hop_length=fine_hop)
     bpm = float(np.atleast_1d(tempo)[0])
-    onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=HOP)
+    onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=fine_hop)
+
+    mag = np.ascontiguousarray(mag_fine[:, ::2])
+    mel = np.ascontiguousarray(mel_fine[:, ::2])
+    del mag_fine, mel_fine, onset_env
 
     # 음량
-    rms = librosa.feature.rms(y=y, hop_length=HOP)[0]
+    rms = librosa.feature.rms(S=mag, frame_length=N_FFT)[0]
     rms_db = librosa.amplitude_to_db(rms, ref=1.0)
     loud = rms_db[rms_db > -60]
 
     # 대역별 에너지
-    spec = np.abs(librosa.stft(y, n_fft=2048, hop_length=HOP)) ** 2
-    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    spec = mag ** 2
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=N_FFT)
     total = spec.sum() + 1e-12
     bass_ratio = float(spec[freqs < 150].sum() / total)
     high_ratio = float(spec[freqs > 5000].sum() / total)
     centroid = float(librosa.feature.spectral_centroid(S=spec, sr=sr).mean())
 
     # 타악기 / 화성 비중 (이미 계산한 스펙트로그램에서 분리해 시간을 아낀다)
-    mag = np.sqrt(spec)
-    harm_s, perc_s = librosa.decompose.hpss(mag, kernel_size=17)
+    del spec
+    low = mag[freqs < HPSS_MAX_HZ]
+    harm_s, perc_s = librosa.decompose.hpss(low, kernel_size=17)
     h_e, p_e = float((harm_s ** 2).sum()), float((perc_s ** 2).sum())
     perc_ratio = p_e / (h_e + p_e + 1e-12)
+    del perc_s, low
 
-    # 조성 (화성 성분만으로 계산)
-    chroma = librosa.feature.chroma_stft(S=harm_s ** 2, sr=sr, hop_length=HOP)
+    # 조성 (화성 성분만으로 계산). 잘라낸 고음역은 0으로 채워 원래 크기로 맞춘다.
+    harm_full = np.zeros_like(mag)
+    harm_full[: harm_s.shape[0]] = harm_s
+    del harm_s, mag
+    chroma = librosa.feature.chroma_stft(S=harm_full ** 2, sr=sr, n_fft=N_FFT, hop_length=HOP)
+    del harm_full
     key = _estimate_key(chroma)
 
     # 2초 단위 에너지 곡선 (0~1)
@@ -123,7 +159,8 @@ def analyze_audio(path: str) -> dict:
         rises.sort(key=lambda r: r["seconds"])
 
     # 구간 나누기 + 반복 구간 찾기
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, hop_length=HOP, n_mfcc=13)
+    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(mel), n_mfcc=13)
+    del mel
     stack = np.vstack([librosa.util.normalize(chroma, axis=1), librosa.util.normalize(mfcc, axis=1)])
     # 0.5초 단위로 묶어서 계산량을 줄인다
     sync_hop = max(1, int(0.5 * sr / HOP))
@@ -136,6 +173,8 @@ def analyze_audio(path: str) -> dict:
     sections = []
     for (a, b), label in zip(segs, labels):
         start, end = a * sync_hop * HOP / sr, min(duration, b * sync_hop * HOP / sr)
+        if end - start < 3:  # 3초 미만 조각은 경계 오차로 보고 버린다
+            continue
         sections.append({
             "start": mmss(start), "end": mmss(end),
             "start_seconds": round(start, 1), "end_seconds": round(end, 1),

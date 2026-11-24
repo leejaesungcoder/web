@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Optional
 
 import anthropic
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import transcribe
+from . import guard, transcribe
 from .analyzer import AnalysisRefused, analyze, has_api_key
 from .audio_features import analyze_audio
 from .references import dataset_stats
@@ -22,7 +22,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 MAX_AUDIO_BYTES = 40 * 1024 * 1024
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm"}
 
-app = FastAPI(title="Rap Reaction")
+app = FastAPI(title="Rap Reaction", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.get("/")
@@ -30,10 +30,16 @@ def index():
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
 @app.get("/api/status")
 def status():
     return {
         "live": has_api_key(),
+        "access_required": bool(guard.ACCESS_CODE),
         "transcription": transcribe.available(),
         "dataset": dataset_stats(),
     }
@@ -63,16 +69,19 @@ def _clean(value: Optional[str], limit: int) -> Optional[str]:
 
 @app.post("/api/analyze")
 async def analyze_endpoint(
+    request: Request,
     lyrics: Optional[str] = Form(None),
     title: Optional[str] = Form(None),
     artist_level: Optional[str] = Form(None),
     vibe: Optional[str] = Form(None),
     audio: Optional[UploadFile] = File(None),
 ):
+    guard.check_access(request)
     lyrics = _clean(lyrics, 20000)
     has_audio = audio is not None and bool(audio.filename)
     if not has_audio and (not lyrics or len(lyrics) < 20):
         raise HTTPException(400, "가사(20자 이상)나 음원 중 하나는 넣어 주세요.")
+    guard.check_rate(request)
 
     audio_info = None
     transcript = None
@@ -80,29 +89,32 @@ async def analyze_endpoint(
         path = await _save_upload(audio)
         try:
             try:
-                audio_info = await run_in_threadpool(analyze_audio, path)
+                async with guard.audio_slot:
+                    audio_info = await run_in_threadpool(analyze_audio, path)
             except ValueError as e:
                 raise HTTPException(400, str(e))
             except Exception:
                 raise HTTPException(400, "음원을 읽지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.")
             if not lyrics and transcribe.available():
                 try:
-                    transcript = await run_in_threadpool(transcribe.transcribe, path)
+                    async with guard.audio_slot:
+                        transcript = await run_in_threadpool(transcribe.transcribe, path)
                 except Exception:
                     transcript = None  # 받아쓰기 실패해도 음원 구조만으로 분석을 계속한다
         finally:
             os.unlink(path)
 
     try:
-        return await run_in_threadpool(
-            analyze,
-            lyrics,
-            _clean(title, 200),
-            _clean(artist_level, 50),
-            _clean(vibe, 500),
-            audio_info,
-            transcript,
-        )
+        async with guard.claude_slot:
+            return await run_in_threadpool(
+                analyze,
+                lyrics,
+                _clean(title, 200),
+                _clean(artist_level, 50),
+                _clean(vibe, 500),
+                audio_info,
+                transcript,
+            )
     except AnalysisRefused as e:
         raise HTTPException(422, str(e))
     except anthropic.AuthenticationError:
