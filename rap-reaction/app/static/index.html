@@ -83,6 +83,26 @@
   .feat div { background: var(--bg); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--muted); }
   .feat b { display: block; font-size: 18px; color: var(--ink); }
   .caveat { font-size: 12px; color: var(--muted); margin-top: 20px; }
+  input[type=file] { padding: 8px; font-size: 13px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .hint-inline { font-weight: 400; color: var(--muted); }
+  .chart { width: 100%; height: auto; display: block; margin-top: 4px; }
+  .chart .curve { fill: none; stroke: var(--accent); stroke-width: 2; }
+  .chart .area { fill: var(--accent); opacity: .12; }
+  .chart .sec { fill: var(--chip); }
+  .chart .sec.alt { fill: transparent; }
+  .chart .sec-label { font-size: 11px; fill: var(--muted); font-weight: 700; }
+  .chart .sec-label.hook { fill: var(--accent); }
+  .chart .axis { font-size: 10px; fill: var(--muted); }
+  .chart .moment { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 3 3; }
+  .chart .moment-dot { fill: var(--ink); }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .moments { display: grid; gap: 8px; }
+  .moment-item { display: grid; grid-template-columns: 52px 1fr; gap: 10px; align-items: start; }
+  .moment-item .ts { font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .moment-item .yt { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-top: 4px; }
+  details { margin-top: 8px; font-size: 13px; }
+  details pre { white-space: pre-wrap; font-family: inherit; color: var(--muted); }
   .demo-banner { background: var(--chip); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 16px; }
 </style>
 </head>
@@ -108,8 +128,11 @@
       </select>
       <label for="vibe">비트 / 분위기 (선택)</label>
       <input id="vibe" maxlength="500" placeholder="예: 붐뱁, 90BPM, 재지한 샘플">
-      <label for="lyrics">가사</label>
-      <textarea id="lyrics" required minlength="20" placeholder="[Verse 1]&#10;가사를 줄 단위로 붙여넣으세요&#10;&#10;[Hook]&#10;…"></textarea>
+      <label for="audio">음원 파일 (선택, 40MB까지)</label>
+      <input id="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm,audio/*">
+      <div class="hint" id="audio-hint">mp3, wav, m4a 등. 넣으면 인트로 길이, 훅 타이밍, 비트 성격까지 반영합니다.</div>
+      <label for="lyrics">가사 <span class="hint-inline">(음원이 있으면 생략 가능, 하지만 넣는 게 훨씬 정확합니다)</span></label>
+      <textarea id="lyrics" placeholder="[Verse 1]&#10;가사를 줄 단위로 붙여넣으세요&#10;&#10;[Hook]&#10;…"></textarea>
       <button id="submit" type="submit">반응 예측하기</button>
     </form>
 
@@ -134,28 +157,34 @@ fetch("/api/status").then(r => r.json()).then(s => {
   const mode = s.live ? "실제 분석 (Claude API 연결됨)" : "데모 모드 (ANTHROPIC_API_KEY 없음)";
   $("#status").replaceChildren(
     "모드: ", el("b", {}, mode),
-    ` · 참고 댓글 데이터: ${s.dataset.comment_count.toLocaleString()}개 / 영상 ${s.dataset.video_count}개`
+    ` · 참고 댓글 데이터: ${s.dataset.comment_count.toLocaleString()}개 / 영상 ${s.dataset.video_count}개`,
+    ` · 가사 받아쓰기: ${s.transcription ? "사용 가능" : "꺼짐"}`
   );
+  if (!s.transcription) $("#audio-hint").textContent += " 받아쓰기가 꺼져 있어서, 음원만 넣으면 가사 없이 곡 구조만으로 분석합니다.";
 }).catch(() => { $("#status").textContent = "서버 상태를 확인하지 못했습니다."; });
 
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const file = $("#audio").files[0];
+  const lyrics = $("#lyrics").value.trim();
+  if (!file && lyrics.length < 20) {
+    $("#result").replaceChildren(el("div", { class: "empty error" }, "가사(20자 이상)나 음원 중 하나는 넣어 주세요."));
+    return;
+  }
   const btn = $("#submit");
   btn.disabled = true; btn.textContent = "분석 중…";
-  $("#result").replaceChildren(el("div", { class: "empty" }, "청자 반응을 예측하는 중입니다…"));
+  $("#result").replaceChildren(el("div", { class: "empty" },
+    file ? "음원을 분석하고 반응을 예측하는 중입니다… (1분 정도 걸릴 수 있어요)" : "청자 반응을 예측하는 중입니다…"));
   try {
-    const res = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        lyrics: $("#lyrics").value,
-        title: $("#title").value || null,
-        artist_level: $("#level").value || null,
-        vibe: $("#vibe").value || null,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "입력값을 확인해 주세요. (가사는 20자 이상)");
+    const form = new FormData();
+    if (lyrics) form.append("lyrics", lyrics);
+    if (file) form.append("audio", file);
+    for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"]]) {
+      if ($(id).value) form.append(k, $(id).value);
+    }
+    const res = await fetch("/api/analyze", { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "요청을 처리하지 못했습니다.");
     render(data);
   } catch (err) {
     $("#result").replaceChildren(el("div", { class: "empty error" }, err.message));
@@ -181,8 +210,68 @@ function bullets(title, items) {
 // replaceChildren는 배열을 펼치지 않으므로 직접 펼치고 null을 걸러낸다.
 const fill = (node, ...kids) => node.replaceChildren(...kids.flat(Infinity).filter(k => k != null));
 
+const SVG = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs = {}, text) => {
+  const n = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  return n;
+};
+const toSec = (t) => { const [m, s] = t.split(":").map(Number); return m * 60 + s; };
+
+// 에너지 흐름 + 구간 + 주요 순간 차트
+function energyChart(a, moments) {
+  const W = 640, H = 170, top = 22, bottom = 22, h = H - top - bottom;
+  const dur = a.duration_seconds, x = (sec) => (sec / dur) * W;
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, class: "chart", role: "img",
+    "aria-label": `에너지 흐름 그래프, 곡 길이 ${a.duration}` });
+  const hook = a.hook_candidate && a.hook_candidate.label;
+  a.sections.forEach((s, i) => {
+    const x0 = x(s.start_seconds), x1 = x(s.end_seconds);
+    svg.append(svgEl("rect", { x: x0, y: top, width: Math.max(0, x1 - x0), height: h, class: i % 2 ? "sec alt" : "sec" }));
+    if (x1 - x0 > 14) svg.append(svgEl("text", { x: (x0 + x1) / 2, y: 14, "text-anchor": "middle",
+      class: "sec-label" + (s.label === hook ? " hook" : "") }, s.label));
+  });
+  const step = a.energy_curve_step_seconds;
+  const pts = a.energy_curve.map((v, i) => [x(i * step + step / 2), top + h - v * h]);
+  if (pts.length) {
+    const line = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join(" ");
+    svg.append(svgEl("path", { d: `${line} L${pts.at(-1)[0]} ${top + h} L${pts[0][0]} ${top + h} Z`, class: "area" }));
+    svg.append(svgEl("path", { d: line, class: "curve" }));
+  }
+  for (const m of moments) {
+    const sec = toSec(m.time);
+    if (!(sec >= 0 && sec <= dur)) continue;
+    svg.append(svgEl("line", { x1: x(sec), x2: x(sec), y1: top, y2: top + h, class: "moment" }));
+    svg.append(svgEl("circle", { cx: x(sec), cy: top + 4, r: 3, class: "moment-dot" }));
+  }
+  for (let t = 0; t <= dur; t += dur > 240 ? 60 : 30) {
+    svg.append(svgEl("text", { x: Math.min(W - 12, Math.max(12, x(t))), y: H - 6, "text-anchor": "middle", class: "axis" },
+      `${Math.floor(t / 60)}:${String(Math.round(t % 60)).padStart(2, "0")}`));
+  }
+  return svg;
+}
+
+function audioPanel(a, moments) {
+  if (!a) return null;
+  const pct = (x) => Math.round(x * 100) + "%";
+  return [
+    el("h2", {}, "음원 분석"),
+    energyChart(a, moments),
+    el("div", { class: "legend" }, "주황 선: 에너지 흐름 · 위 글자: 비슷한 소리끼리 같은 글자" +
+      (a.hook_candidate ? ` (주황 글자 ${a.hook_candidate.label} = 훅 후보)` : "") + " · 점선: 댓글이 몰릴 순간"),
+    el("div", { class: "feat", style: "margin-top:10px" },
+      el("div", {}, el("b", {}, a.duration), "곡 길이"),
+      el("div", {}, el("b", {}, Math.round(a.bpm)), a.bpm_note || "BPM"),
+      el("div", {}, el("b", {}, a.intro_seconds + "초"), "비트 들어오는 시점"),
+      el("div", {}, el("b", {}, a.hook_candidate ? a.hook_candidate.first_at : "-"), "첫 훅 후보"),
+      el("div", {}, el("b", {}, pct(a.bass_ratio)), "저음 비중"),
+      el("div", {}, el("b", {}, a.key), "추정 조성")),
+  ];
+}
+
 function render(data) {
-  const r = data.report, f = data.features;
+  const r = data.report, f = data.features, a = data.audio;
   const pct = (x) => Math.round(x * 100) + "%";
   fill($("#result"),
     data.mode === "demo" ? el("div", { class: "demo-banner" }, "데모 결과입니다. 서버에 ANTHROPIC_API_KEY를 설정하면 실제 분석이 실행됩니다.") : null,
@@ -199,6 +288,15 @@ function render(data) {
         a.likes.map(t => el("span", { class: "tag good" }, t)),
         a.dislikes.map(t => el("span", { class: "tag bad" }, t))))),
 
+    audioPanel(a, r.key_moments),
+
+    r.key_moments.length ? el("h2", {}, "타임스탬프 댓글이 몰릴 순간") : null,
+    r.key_moments.length ? el("div", { class: "moments" }, r.key_moments.map(m => el("div", { class: "moment-item" },
+      el("div", { class: "ts" }, m.time),
+      el("div", {}, el("div", {}, m.what), el("div", { class: "yt" }, m.expected_comment))))) : null,
+
+    bullets("곡 구성 피드백", r.sound_feedback),
+
     el("h2", {}, "예상 댓글"),
     el("div", { class: "comments" }, r.predicted_comments.map(c => el("div", { class: "cmt" },
       el("div", { class: "cmt-meta" }, el("span", {}, c.audience), el("span", { class: "tone-" + c.tone }, c.tone)),
@@ -212,14 +310,16 @@ function render(data) {
     lineList(r.weak_lines, "lo"),
     bullets("논란 소지", r.risks),
 
-    el("h2", {}, "가사 지표 (자동 계산)"),
-    el("div", { class: "feat" },
+    f ? el("h2", {}, data.transcript ? "가사 지표 (자동 받아쓰기 기준)" : "가사 지표 (자동 계산)") : null,
+    f ? el("div", { class: "feat" },
       el("div", {}, el("b", {}, f.line_count), "줄 수"),
       el("div", {}, el("b", {}, pct(f.end_rhyme_ratio)), "끝 라임 일치율"),
       el("div", {}, el("b", {}, pct(f.unique_word_ratio)), "어휘 다양성"),
       el("div", {}, el("b", {}, pct(f.english_ratio)), "영어 비율"),
       el("div", {}, el("b", {}, f.avg_syllables_per_line), "줄당 평균 음절"),
-      el("div", {}, el("b", {}, f.repeated_lines.length), "반복 구절(훅 후보)")),
+      el("div", {}, el("b", {}, f.repeated_lines.length), "반복 구절(훅 후보)")) : null,
+    data.transcript ? el("details", {}, el("summary", {}, "자동 받아쓰기 결과 보기 (오인식 많음)"),
+      el("pre", {}, data.transcript.map(s => `[${s.time}] ${s.text}`).join("\n"))) : null,
 
     el("p", { class: "caveat" }, r.caveats +
       (data.reference_count ? ` · 실제 유튜브 댓글 ${data.reference_count}개를 말투 참고로 사용했습니다.` : "")),
