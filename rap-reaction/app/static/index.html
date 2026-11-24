@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rap Reaction</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --surface: #ffffff; --ink: #17161a; --muted: #6b6870;
+    --line: #e3e0da; --accent: #d9481f; --accent-ink: #ffffff;
+    --good: #1f7a4d; --bad: #b3261e; --neutral: #6b6870; --meme: #7a4fd1;
+    --chip: #f0ede7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111014; --surface: #1b1a20; --ink: #f1eff4; --muted: #a29fa8;
+      --line: #2d2b33; --accent: #ff6a3d; --accent-ink: #111014;
+      --good: #4cc38a; --bad: #ff7b72; --neutral: #a29fa8; --meme: #b69cff;
+      --chip: #25232b;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111014; --surface: #1b1a20; --ink: #f1eff4; --muted: #a29fa8;
+    --line: #2d2b33; --accent: #ff6a3d; --accent-ink: #111014;
+    --good: #4cc38a; --bad: #ff7b72; --neutral: #a29fa8; --meme: #b69cff;
+    --chip: #25232b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+  header h1 { font-size: 28px; margin: 0; letter-spacing: -0.02em; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  .status { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .status b { color: var(--ink); }
+  .grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 24px; margin-top: 24px; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+  label:first-child { margin-top: 0; }
+  input, select, textarea {
+    width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  }
+  textarea { min-height: 340px; resize: vertical; font-size: 14px; line-height: 1.7; }
+  button {
+    margin-top: 16px; width: 100%; padding: 12px; border: 0; border-radius: 8px;
+    background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 700; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: wait; }
+  .empty { color: var(--muted); text-align: center; padding: 64px 16px; }
+  .error { color: var(--bad); }
+  .score-row { display: flex; align-items: center; gap: 20px; }
+  .big { font-size: 56px; font-weight: 800; line-height: 1; letter-spacing: -0.03em; white-space: nowrap; }
+  .big small { font-size: 18px; color: var(--muted); font-weight: 600; }
+  .reach { display: inline-block; font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; background: var(--chip); }
+  .verdict { font-size: 17px; font-weight: 600; margin: 6px 0 0; }
+  h2 { font-size: 15px; margin: 24px 0 10px; }
+  .aud { border-top: 1px solid var(--line); padding: 14px 0; }
+  .aud-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .aud-name { font-weight: 700; }
+  .bar { height: 6px; background: var(--chip); border-radius: 3px; margin: 6px 0 8px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--chip); }
+  .tag.good::before { content: "+ "; color: var(--good); font-weight: 700; }
+  .tag.bad::before { content: "− "; color: var(--bad); font-weight: 700; }
+  .comments { display: grid; gap: 8px; }
+  .cmt { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .cmt-meta { font-size: 11px; color: var(--muted); display: flex; gap: 8px; }
+  .tone-호평 { color: var(--good); } .tone-혹평 { color: var(--bad); }
+  .tone-중립 { color: var(--neutral); } .tone-밈 { color: var(--meme); }
+  ul { margin: 0; padding-left: 18px; }
+  .lines .ln { border-left: 3px solid var(--line); padding: 4px 0 4px 12px; margin-bottom: 10px; }
+  .lines.hi .ln { border-color: var(--good); }
+  .lines.lo .ln { border-color: var(--bad); }
+  .ln q { font-weight: 600; display: block; }
+  .ln .sug { color: var(--muted); font-size: 13px; }
+  .feat { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  .feat div { background: var(--bg); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--muted); }
+  .feat b { display: block; font-size: 18px; color: var(--ink); }
+  .caveat { font-size: 12px; color: var(--muted); margin-top: 20px; }
+  .demo-banner { background: var(--chip); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Rap Reaction</h1>
+    <p>발매 전 가사를 넣으면 평론가, 힙합 커뮤니티, 일반 청자의 반응을 예측합니다.</p>
+    <div class="status" id="status">상태 확인 중…</div>
+  </header>
+
+  <div class="grid">
+    <form class="card" id="form">
+      <label for="title">곡 제목 (선택)</label>
+      <input id="title" maxlength="200" placeholder="예: 새벽 세시">
+      <label for="level">아티스트 인지도 (선택)</label>
+      <select id="level">
+        <option value="">선택 안 함</option>
+        <option>신인 (첫 발매)</option>
+        <option>언더그라운드 (팬층 소규모)</option>
+        <option>중견 (씬에서 인지도 있음)</option>
+        <option>메인스트림</option>
+      </select>
+      <label for="vibe">비트 / 분위기 (선택)</label>
+      <input id="vibe" maxlength="500" placeholder="예: 붐뱁, 90BPM, 재지한 샘플">
+      <label for="lyrics">가사</label>
+      <textarea id="lyrics" required minlength="20" placeholder="[Verse 1]&#10;가사를 줄 단위로 붙여넣으세요&#10;&#10;[Hook]&#10;…"></textarea>
+      <button id="submit" type="submit">반응 예측하기</button>
+    </form>
+
+    <section class="card" id="result" aria-live="polite">
+      <div class="empty">가사를 입력하고 <b>반응 예측하기</b>를 누르세요.<br>분석에 30초~1분 정도 걸립니다.</div>
+    </section>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v; else if (k === "style") n.style.cssText = v; else n.setAttribute(k, v);
+  }
+  for (const k of kids.flat(Infinity)) if (k != null) n.append(k);
+  return n;
+};
+
+fetch("/api/status").then(r => r.json()).then(s => {
+  const mode = s.live ? "실제 분석 (Claude API 연결됨)" : "데모 모드 (ANTHROPIC_API_KEY 없음)";
+  $("#status").replaceChildren(
+    "모드: ", el("b", {}, mode),
+    ` · 참고 댓글 데이터: ${s.dataset.comment_count.toLocaleString()}개 / 영상 ${s.dataset.video_count}개`
+  );
+}).catch(() => { $("#status").textContent = "서버 상태를 확인하지 못했습니다."; });
+
+$("#form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#submit");
+  btn.disabled = true; btn.textContent = "분석 중…";
+  $("#result").replaceChildren(el("div", { class: "empty" }, "청자 반응을 예측하는 중입니다…"));
+  try {
+    const res = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        lyrics: $("#lyrics").value,
+        title: $("#title").value || null,
+        artist_level: $("#level").value || null,
+        vibe: $("#vibe").value || null,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "입력값을 확인해 주세요. (가사는 20자 이상)");
+    render(data);
+  } catch (err) {
+    $("#result").replaceChildren(el("div", { class: "empty error" }, err.message));
+  } finally {
+    btn.disabled = false; btn.textContent = "반응 예측하기";
+  }
+});
+
+function lineList(items, cls) {
+  if (!items.length) return null;
+  return el("div", { class: `lines ${cls}` }, items.map(l =>
+    el("div", { class: "ln" },
+      el("q", {}, l.line),
+      el("div", {}, l.comment),
+      l.suggestion ? el("div", { class: "sug" }, "제안: " + l.suggestion) : null)));
+}
+
+function bullets(title, items) {
+  if (!items.length) return null;
+  return [el("h2", {}, title), el("ul", {}, items.map(t => el("li", {}, t)))];
+}
+
+// replaceChildren는 배열을 펼치지 않으므로 직접 펼치고 null을 걸러낸다.
+const fill = (node, ...kids) => node.replaceChildren(...kids.flat(Infinity).filter(k => k != null));
+
+function render(data) {
+  const r = data.report, f = data.features;
+  const pct = (x) => Math.round(x * 100) + "%";
+  fill($("#result"),
+    data.mode === "demo" ? el("div", { class: "demo-banner" }, "데모 결과입니다. 서버에 ANTHROPIC_API_KEY를 설정하면 실제 분석이 실행됩니다.") : null,
+    el("div", { class: "score-row" },
+      el("div", { class: "big" }, String(r.overall_score), el("small", {}, " / 100")),
+      el("div", {}, el("span", { class: "reach" }, r.reach), el("p", { class: "verdict" }, r.verdict))),
+
+    el("h2", {}, "청자층별 반응"),
+    r.audiences.map(a => el("div", { class: "aud" },
+      el("div", { class: "aud-head" }, el("span", { class: "aud-name" }, a.audience), el("span", {}, a.score + "점")),
+      el("div", { class: "bar" }, el("i", { style: `width:${Math.max(0, Math.min(100, a.score))}%` })),
+      el("div", {}, a.summary),
+      el("div", { class: "tags" },
+        a.likes.map(t => el("span", { class: "tag good" }, t)),
+        a.dislikes.map(t => el("span", { class: "tag bad" }, t))))),
+
+    el("h2", {}, "예상 댓글"),
+    el("div", { class: "comments" }, r.predicted_comments.map(c => el("div", { class: "cmt" },
+      el("div", { class: "cmt-meta" }, el("span", {}, c.audience), el("span", { class: "tone-" + c.tone }, c.tone)),
+      el("div", {}, c.text)))),
+
+    bullets("강점", r.strengths),
+    bullets("약점", r.weaknesses),
+    r.highlight_lines.length ? el("h2", {}, "화제가 될 구절") : null,
+    lineList(r.highlight_lines, "hi"),
+    r.weak_lines.length ? el("h2", {}, "고치면 좋을 구절") : null,
+    lineList(r.weak_lines, "lo"),
+    bullets("논란 소지", r.risks),
+
+    el("h2", {}, "가사 지표 (자동 계산)"),
+    el("div", { class: "feat" },
+      el("div", {}, el("b", {}, f.line_count), "줄 수"),
+      el("div", {}, el("b", {}, pct(f.end_rhyme_ratio)), "끝 라임 일치율"),
+      el("div", {}, el("b", {}, pct(f.unique_word_ratio)), "어휘 다양성"),
+      el("div", {}, el("b", {}, pct(f.english_ratio)), "영어 비율"),
+      el("div", {}, el("b", {}, f.avg_syllables_per_line), "줄당 평균 음절"),
+      el("div", {}, el("b", {}, f.repeated_lines.length), "반복 구절(훅 후보)")),
+
+    el("p", { class: "caveat" }, r.caveats +
+      (data.reference_count ? ` · 실제 유튜브 댓글 ${data.reference_count}개를 말투 참고로 사용했습니다.` : "")),
+  );
+}
+</script>
+</body>
+</html>
