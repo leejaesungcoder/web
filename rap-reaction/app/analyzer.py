@@ -6,6 +6,8 @@ import json
 import os
 from typing import Literal, Optional
 
+import logging
+
 import anthropic
 from pydantic import BaseModel, Field
 
@@ -15,6 +17,7 @@ from .taste import prompt_block as taste_block
 from .volume import estimate as estimate_volume
 
 MODEL = os.environ.get("RAP_REACTION_MODEL", "claude-opus-5-5")
+log = logging.getLogger("rap_reaction")
 
 
 # ---------- 출력 스키마 ----------
@@ -418,17 +421,19 @@ def analyze(
 
     # 스트리밍으로 받아 타임아웃을 피하고, 완성된 메시지만 사용한다.
     # fallbacks="default": 안전 분류기가 요청을 거절하면 서버가 다른 모델로 자동 재시도한다.
-    with client.beta.messages.stream(
-        model=MODEL,
-        max_tokens=16000,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-        output_config={"effort": "high"},
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-        output_format=ReactionReport,
-    ) as stream:
-        message = stream.get_final_message()
+    def run(**extra):
+        with client.beta.messages.stream(
+            model=MODEL,
+            max_tokens=16000,
+            output_config={"effort": "high"},
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+            output_format=ReactionReport,
+            **extra,
+        ) as stream:
+            return stream.get_final_message()
+
+    message = _with_fallback_retry(run)
 
     if message.stop_reason == "refusal":
         raise AnalysisRefused("모델이 이 가사의 분석을 거절했습니다.")
@@ -450,6 +455,32 @@ def analyze(
             "output_tokens": message.usage.output_tokens,
         },
     })
+
+
+FALLBACK_ARGS = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+
+
+def api_error_message(e: anthropic.APIStatusError) -> str:
+    """Anthropic이 돌려준 오류 설명 (키 같은 비밀은 들어 있지 않다)."""
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+    return getattr(e, "message", "") or ""
+
+
+def _with_fallback_retry(call):
+    """거절 대비 자동 재시도(fallbacks, 베타)를 켜고 호출한다.
+    계정이 그 기능을 지원하지 않아 400이 나면, 그 기능을 빼고 한 번 더 호출한다."""
+    try:
+        return call(**FALLBACK_ARGS)
+    except anthropic.BadRequestError as e:
+        msg = api_error_message(e).lower()
+        if any(w in msg for w in ("credit", "billing", "balance")):
+            raise
+        log.warning("fallbacks 포함 요청이 400으로 거부되어 fallbacks 없이 다시 시도합니다: %s", msg[:300])
+        return call()
 
 
 def _client() -> anthropic.Anthropic:
@@ -507,16 +538,16 @@ def actual_reaction(youtube: dict, report: dict | None) -> dict | None:
         + pred
         + f"<실제_댓글 인기순 {len(comments)}개>\n{lines}\n</실제_댓글>"
     )
-    message = _client().beta.messages.parse(
+    client = _client()
+    message = _with_fallback_retry(lambda **extra: client.beta.messages.parse(
         model=MODEL,
         max_tokens=8000,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
         output_config={"effort": "low"},
         system=ACTUAL_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user}],
         output_format=ActualReaction,
-    )
+        **extra,
+    ))
     if message.stop_reason in ("refusal", "max_tokens") or message.parsed_output is None:
         return None
     actual = message.parsed_output.model_dump()

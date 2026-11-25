@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from . import guard, youtube
-from .analyzer import AnalysisRefused, analyze, has_api_key, key_format_problem
+from .analyzer import AnalysisRefused, analyze, api_error_message, has_api_key, key_format_problem
 from .references import dataset_stats
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -193,7 +193,8 @@ async def analyze_endpoint(req: AnalyzeRequest, request: Request):
 
 def _explain_api_error(e: anthropic.APIStatusError) -> tuple[int, str]:
     """Claude API 오류를 사용자가 고칠 수 있는 설명으로 바꾼다. 키 값은 절대 넣지 않는다."""
-    msg = (getattr(e, "message", "") or "").lower()
+    detail = api_error_message(e)
+    msg = detail.lower()
     log.warning("Claude API error %s (request_id=%s): %s", e.status_code, getattr(e, "request_id", None), msg[:300])
     if isinstance(e, anthropic.AuthenticationError):
         hint = key_format_problem()
@@ -213,7 +214,9 @@ def _explain_api_error(e: anthropic.APIStatusError) -> tuple[int, str]:
         return 402, "Claude API 크레딧이 부족합니다. console.anthropic.com → Billing에서 크레딧을 충전해 주세요."
     if e.status_code == 529 or e.status_code >= 500:
         return 503, "Claude API 서버가 일시적으로 바쁩니다. 잠시 후 다시 시도해 주세요."
-    return 502, f"Claude API 오류 ({e.status_code})"
+    if e.status_code == 400:
+        return 502, f"Claude API가 요청을 거부했습니다 (400). Anthropic 설명: {detail[:300]}"
+    return 502, f"Claude API 오류 ({e.status_code}): {detail[:300]}"
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
