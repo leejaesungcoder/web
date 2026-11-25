@@ -9,7 +9,7 @@ from typing import Literal, Optional
 import logging
 
 import anthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .lyrics_features import extract_features
 from .references import sample_reference_comments
@@ -419,30 +419,43 @@ def analyze(
         lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views, delivery, youtube
     )
 
-    # 스트리밍으로 받아 타임아웃을 피하고, 완성된 메시지만 사용한다.
-    # fallbacks="default": 안전 분류기가 요청을 거절하면 서버가 다른 모델로 자동 재시도한다.
-    def run(**extra):
+    # 결과 구조가 커서 API의 형식 강제(structured outputs) 한도를 넘는다.
+    # 그래서 형식은 지시문으로 알려 주고, 받은 JSON을 서버에서 검사한다. 틀리면 한 번 고쳐 달라고 한다.
+    # 스트리밍으로 받아 타임아웃을 피하고, 고정 지시문은 캐시해서 비용을 줄인다.
+    messages = [{"role": "user", "content": user_message}]
+
+    def run(msgs, effort, **extra):
         with client.beta.messages.stream(
             model=MODEL,
             max_tokens=16000,
-            output_config={"effort": "high"},
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-            output_format=ReactionReport,
+            output_config={"effort": effort},
+            system=[{"type": "text", "text": MAIN_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=msgs,
             **extra,
         ) as stream:
             return stream.get_final_message()
 
-    message = _with_fallback_retry(run)
-
-    if message.stop_reason == "refusal":
-        raise AnalysisRefused("모델이 이 가사의 분석을 거절했습니다.")
-    if message.stop_reason == "max_tokens":
-        raise RuntimeError("응답이 너무 길어 중간에 잘렸습니다. 가사를 나눠서 다시 시도해 주세요.")
-
-    report = message.parsed_output
-    if report is None:
-        raise RuntimeError("분석 결과를 해석하지 못했습니다.")
+    message = _with_fallback_retry(lambda **extra: run(messages, "high", **extra))
+    _check_stop(message)
+    usage = [message.usage]
+    try:
+        report = _parse_report(message)
+    except ValueError as err:
+        log.warning("분석 결과 형식 오류, 고쳐 달라고 다시 요청합니다: %s", str(err)[:300])
+        fix = messages + [
+            {"role": "assistant", "content": message.content},
+            {"role": "user", "content": (
+                "위 출력이 지정한 JSON 구조에 맞지 않습니다. 문제:\n" + str(err)[:1500]
+                + "\n\n지정한 구조에 맞게 고친 JSON 객체 전체만 다시 출력하세요. 내용은 바꾸지 말고 형식만 고칩니다."
+            )},
+        ]
+        message = _with_fallback_retry(lambda **extra: run(fix, "low", **extra))
+        _check_stop(message)
+        usage.append(message.usage)
+        try:
+            report = _parse_report(message)
+        except ValueError as err2:
+            raise RuntimeError("분석 결과의 형식이 맞지 않아 표시하지 못했습니다. 다시 시도해 주세요.") from err2
 
     return finish({
         "mode": "live",
@@ -451,8 +464,10 @@ def analyze(
         "report": report_dict(report),
         "volume_estimate": with_volume(report),
         "usage": {
-            "input_tokens": message.usage.input_tokens,
-            "output_tokens": message.usage.output_tokens,
+            "input_tokens": sum(u.input_tokens for u in usage),
+            "output_tokens": sum(u.output_tokens for u in usage),
+            "cache_read_input_tokens": sum((u.cache_read_input_tokens or 0) for u in usage),
+            "calls": len(usage),
         },
     })
 
@@ -481,6 +496,63 @@ def _with_fallback_retry(call):
             raise
         log.warning("fallbacks 포함 요청이 400으로 거부되어 fallbacks 없이 다시 시도합니다: %s", msg[:300])
         return call()
+
+
+def _check_stop(message) -> None:
+    if message.stop_reason == "refusal":
+        raise AnalysisRefused("모델이 이 가사의 분석을 거절했습니다.")
+    if message.stop_reason == "max_tokens":
+        raise RuntimeError("응답이 너무 길어 중간에 잘렸습니다. 가사를 나눠서 다시 시도해 주세요.")
+
+
+def _parse_report(message) -> "ReactionReport":
+    """응답 텍스트에서 JSON 객체를 꺼내 ReactionReport로 검사한다. 맞지 않으면 ValueError."""
+    text = "".join(b.text for b in message.content if getattr(b, "type", "") == "text").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("JSON 객체를 찾지 못했습니다.")
+    try:
+        return ReactionReport.model_validate_json(text[start:end + 1])
+    except ValidationError as e:
+        problems = "; ".join(
+            f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}" for err in e.errors()[:15]
+        )
+        raise ValueError(problems or str(e)) from e
+
+
+def _schema_template(model: type[BaseModel]) -> str:
+    """Pydantic 모델을 JSON 모양의 출력 틀로 바꾼다. // 뒤는 설명."""
+    schema = model.model_json_schema()
+    defs = schema.get("$defs", {})
+
+    def resolve(node: dict) -> dict:
+        while "$ref" in node:
+            node = defs[node["$ref"].split("/")[-1]]
+        return node
+
+    def render(node: dict, indent: int) -> str:
+        node = resolve(node)
+        pad = "  " * indent
+        if "anyOf" in node:
+            options = [resolve(o) for o in node["anyOf"] if o.get("type") != "null"]
+            return render(options[0], indent) + " 또는 null"
+        if "enum" in node:
+            return " | ".join(json.dumps(v, ensure_ascii=False) for v in node["enum"])
+        t = node.get("type")
+        if t == "object":
+            props = node.get("properties", {})
+            lines = []
+            for i, (name, sub) in enumerate(props.items()):
+                comma = "," if i < len(props) - 1 else ""
+                desc = sub.get("description") or resolve(sub).get("description", "")
+                note = f"  // {desc}" if desc else ""
+                lines.append(f"{pad}  {json.dumps(name)}: {render(sub, indent + 1)}{comma}{note}")
+            return "{\n" + "\n".join(lines) + f"\n{pad}}}"
+        if t == "array":
+            return "[" + render(node.get("items", {}), indent) + ", …]"
+        return {"string": '"문자열"', "integer": "정수", "number": "숫자", "boolean": "true | false"}.get(t, "값")
+
+    return render(schema, 0)
 
 
 def _client() -> anthropic.Anthropic:
@@ -656,3 +728,14 @@ def _demo_report(features: dict | None, audio: dict | None = None) -> ReactionRe
         ),
         caveats="데모 모드입니다. ANTHROPIC_API_KEY 환경 변수를 설정하세요.",
     )
+
+
+# 메인 분석의 고정 지시문 = 분석 지침 + 출력 형식. 요청마다 같으므로 캐시된다.
+MAIN_SYSTEM = (
+    SYSTEM_PROMPT
+    + "\n\n출력 형식:\n"
+    "아래 구조의 JSON 객체 하나만 출력한다. 앞뒤에 설명 문장이나 코드 블록 표시(```)를 붙이지 않는다. "
+    "// 뒤는 설명이므로 출력하지 않는다. 필드 이름과 선택지(| 로 나뉜 값)는 글자 그대로 쓴다. "
+    "모든 필드를 빠짐없이 채운다.\n"
+    + _schema_template(ReactionReport)
+)
