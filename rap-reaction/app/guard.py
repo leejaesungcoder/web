@@ -27,6 +27,8 @@ audio_slot = asyncio.Semaphore(1)
 claude_slot = asyncio.Semaphore(int(os.environ.get("MAX_CONCURRENT_ANALYSES", "4")))
 
 _hits: dict[str, deque[float]] = defaultdict(deque)
+_lookups: dict[str, deque[float]] = defaultdict(deque)
+LOOKUPS_PER_HOUR = int(os.environ.get("YOUTUBE_LOOKUPS_PER_HOUR", "30"))
 _day = {"date": "", "count": 0}
 
 
@@ -66,3 +68,14 @@ def check_rate(request: Request) -> None:
     if len(_hits) > 10000:  # 오래된 IP 기록 정리
         for ip in [ip for ip, d in _hits.items() if not d or now - d[-1] > 3600]:
             del _hits[ip]
+
+
+def check_lookup(request: Request) -> None:
+    """유튜브 링크 불러오기 횟수 제한 (유튜브 API 무료 사용량 보호)."""
+    now = time.time()
+    q = _lookups[client_ip(request)]
+    while q and now - q[0] > 3600:
+        q.popleft()
+    if len(q) >= LOOKUPS_PER_HOUR:
+        raise HTTPException(429, f"유튜브 링크는 한 시간에 {LOOKUPS_PER_HOUR}번까지 불러올 수 있습니다.")
+    q.append(now)

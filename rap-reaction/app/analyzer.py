@@ -106,6 +106,33 @@ class ReactionReport(BaseModel):
     caveats: str = Field(description="이 예측의 한계")
 
 
+class QuotedComment(BaseModel):
+    text: str = Field(description="주어진 실제 댓글을 글자 그대로 인용 (고치거나 지어내지 않는다)")
+    why: str = Field(description="이 댓글이 반응을 대표하는 이유")
+
+
+class ActualReaction(BaseModel):
+    summary: str = Field(description="실제 리스너 반응 요약 2~3문장")
+    listener_score_estimate: int = Field(description="실제 댓글로 본 국힙 리스너 평가, 0~100. 예측과 같은 점수 기준표를 따른다")
+    positive_share: int = Field(description="호평 댓글 비율 추정, 0~100")
+    negative_share: int = Field(description="혹평 댓글 비율 추정, 0~100")
+    praised: list[str] = Field(description="리스너들이 실제로 칭찬한 포인트")
+    criticized: list[str] = Field(description="리스너들이 실제로 지적한 포인트. 없으면 빈 배열")
+    representative_comments: list[QuotedComment] = Field(description="반응을 대표하는 실제 댓글 3~5개")
+    prediction_gap: str = Field(description="AI 예측과 실제 반응이 어디서 같고 어디서 달랐는지, 예측이 놓친 점. 예측이 없으면 빈 문자열")
+
+
+ACTUAL_SYSTEM_PROMPT = """너는 국힙 유튜브 댓글을 분석하는 리서처다. 이미 공개된 곡에 실제로 달린 댓글을 읽고, 리스너들이 실제로 어떻게 반응했는지 정리한다.
+
+- 주어진 댓글만 근거로 쓴다. 댓글에 없는 반응을 지어내지 않는다.
+- 댓글은 좋아요 많은 순(인기순) 상위 일부라서 호평 쪽으로 치우쳐 있을 수 있다. 비율을 추정할 때 감안한다.
+- 아티스트 개인에 대한 잡담, 홍보성 댓글, 다른 곡 얘기는 곡 평가에서 뺀다.
+- listener_score_estimate는 아래 기준표를 따른다: 90~100 시대의 클래식으로 회자, 80~89 명곡이라는 평이 압도적, 70~79 호평 우세, 60~69 괜찮지만 호불호, 50~59 무난함, 40~49 아쉽다는 반응 우세, 40 미만 혹평.
+- representative_comments의 text는 주어진 댓글을 글자 그대로 옮긴다.
+- AI 예측이 주어지면 prediction_gap에 예측과 실제의 차이를 솔직하게 적는다. 예측이 틀렸다면 어떤 판단이 틀렸는지(스타일 판단, 딜리버리, 네임밸류 등) 짚는다.
+- 모든 출력은 한국어로 쓴다."""
+
+
 # ---------- 프롬프트 ----------
 
 SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 평론가다. 래퍼가 발매 전 가사를 보여주면, 이 곡이 실제로 공개됐을 때 청자들이 어떻게 반응할지 예측한다.
@@ -215,6 +242,7 @@ def _build_user_message(
     subscribers: int | None = None,
     avg_views: int | None = None,
     delivery: str | None = None,
+    youtube: dict | None = None,
 ) -> str:
     parts = ["다음 곡이 공개됐을 때의 청자 반응, 특히 유튜브 댓글 반응을 예측해줘.\n"]
     meta = {
@@ -225,6 +253,9 @@ def _build_user_message(
         "곡 분위기/비트 설명": vibe or "(미입력)",
         "랩 스타일·딜리버리 설명 (아티스트 본인 설명)": delivery or "(미입력)",
     }
+    if youtube:
+        # 예측이 정답을 미리 보지 않도록 조회수·댓글은 넣지 않는다
+        meta["유튜브 영상"] = f"{youtube.get('title', '')} / 채널: {youtube.get('channel', '')}"
     parts.append("<곡_정보>\n" + json.dumps(meta, ensure_ascii=False, indent=2) + "\n</곡_정보>\n")
     if audio:
         parts.append(
@@ -331,9 +362,19 @@ def analyze(
     subscribers: int | None = None,
     avg_views: int | None = None,
     delivery: str | None = None,
+    youtube: dict | None = None,
 ) -> dict:
-    if not lyrics and not audio:
+    if not lyrics and not audio and not youtube:
         raise ValueError("가사나 음원 중 하나는 있어야 합니다.")
+
+    baseline_note = None
+    if youtube:
+        title = title or youtube.get("title")
+        if not subscribers and youtube.get("subscribers"):
+            subscribers = youtube["subscribers"]
+        if not avg_views and youtube.get("channel_median_views"):
+            avg_views = youtube["channel_median_views"]
+            baseline_note = f"채널 최근 영상 {youtube.get('channel_recent_count')}개의 조회수 중앙값 (누적 조회수 기준)"
 
     features = extract_features(lyrics) if lyrics else None
     references = sample_reference_comments()
@@ -341,23 +382,38 @@ def analyze(
         "features": features,
         "audio": audio,
         "reference_count": len(references),
+        "youtube": _youtube_public(youtube) if youtube else None,
     }
+    can_predict = bool(lyrics or audio)
 
     def with_volume(report: "ReactionReport") -> dict:
         v = report.volume
-        return estimate_volume(
+        est = estimate_volume(
             v.performance_multiplier, v.viral_potential, v.comment_intensity,
             artist_level, subscribers, avg_views,
         )
+        if baseline_note and est.get("available") and est["baseline_source"].startswith("입력한"):
+            est["baseline_source"] = baseline_note
+        return est
+
+    def finish(result: dict) -> dict:
+        if youtube:
+            result["actual"] = actual_reaction(youtube, result.get("report"))
+            result["comparison"] = _compare(youtube, result.get("report"), result.get("volume_estimate"), result["actual"])
+        return result
 
     if not has_api_key():
+        if not can_predict:
+            return finish({"mode": "demo", **common, "report": None})
         report = _demo_report(features, audio)
-        return {"mode": "demo", **common, "report": report_dict(report), "volume_estimate": with_volume(report)}
+        return finish({"mode": "demo", **common, "report": report_dict(report), "volume_estimate": with_volume(report)})
 
-    key = _api_key()
-    client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
+    if not can_predict:
+        return finish({"mode": "live", **common, "report": None})
+
+    client = _client()
     user_message = _build_user_message(
-        lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views, delivery
+        lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views, delivery, youtube
     )
 
     # 스트리밍으로 받아 타임아웃을 피하고, 완성된 메시지만 사용한다.
@@ -383,7 +439,7 @@ def analyze(
     if report is None:
         raise RuntimeError("분석 결과를 해석하지 못했습니다.")
 
-    return {
+    return finish({
         "mode": "live",
         "model": message.model,
         **common,
@@ -393,7 +449,103 @@ def analyze(
             "input_tokens": message.usage.input_tokens,
             "output_tokens": message.usage.output_tokens,
         },
-    }
+    })
+
+
+def _client() -> anthropic.Anthropic:
+    key = _api_key()
+    return anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
+
+
+def _youtube_public(yt: dict) -> dict:
+    """화면에 돌려줄 영상 정보 (댓글 원문 목록과 설명란 전체는 빼고)."""
+    keys = ["video_id", "url", "title", "channel", "published_at", "days_since_upload", "thumbnail",
+            "views", "likes", "comment_count", "subscribers", "channel_median_views", "channel_recent_count"]
+    out = {k: yt.get(k) for k in keys}
+    out["fetched_comments"] = len(yt.get("comments", []))
+    return out
+
+
+def _norm(t: str) -> str:
+    return " ".join(t.split())
+
+
+def actual_reaction(youtube: dict, report: dict | None) -> dict | None:
+    """실제 댓글을 분석한다. 댓글이 없으면 None."""
+    comments = youtube.get("comments") or []
+    if not comments:
+        return None
+    if not has_api_key():
+        return {
+            "demo": True,
+            "summary": f"[데모] 실제 댓글 {len(comments)}개를 가져왔습니다. API 키를 설정하면 여기에 실제 반응 분석이 표시됩니다.",
+            "listener_score_estimate": None, "positive_share": None, "negative_share": None,
+            "praised": [], "criticized": [],
+            "representative_comments": [{"text": c["text"], "why": f"좋아요 {c['likes']:,}개"} for c in comments[:3]],
+            "prediction_gap": "",
+        }
+
+    lines = "\n".join(f"- (좋아요 {c['likes']}) {_norm(c['text'])[:300]}" for c in comments)
+    pred = ""
+    if report:
+        scores = {a["audience"]: a["score"] for a in report["audiences"]}
+        pred = (
+            "<AI_예측>\n"
+            + json.dumps({
+                "스타일 판단": report["style_read"]["style"],
+                "청자층별 예측 점수": scores,
+                "종합 점수": report.get("overall_score"),
+                "총평": report["verdict"],
+                "예측한 약점": report["weaknesses"],
+            }, ensure_ascii=False, indent=2)
+            + "\n</AI_예측>\n"
+        )
+    user = (
+        f"곡: {youtube.get('title')} / 채널: {youtube.get('channel')}\n"
+        f"업로드 후 {youtube.get('days_since_upload')}일, 조회수 {youtube.get('views')}, "
+        f"좋아요 {youtube.get('likes')}, 댓글 {youtube.get('comment_count')}\n\n"
+        + pred
+        + f"<실제_댓글 인기순 {len(comments)}개>\n{lines}\n</실제_댓글>"
+    )
+    message = _client().beta.messages.parse(
+        model=MODEL,
+        max_tokens=8000,
+        betas=["server-side-fallback-2026-07-01"],
+        fallbacks="default",
+        output_config={"effort": "low"},
+        system=ACTUAL_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user}],
+        output_format=ActualReaction,
+    )
+    if message.stop_reason in ("refusal", "max_tokens") or message.parsed_output is None:
+        return None
+    actual = message.parsed_output.model_dump()
+    # 인용한 댓글이 실제로 있는 댓글인지 확인하고, 없는 건 버린다
+    pool = [_norm(c["text"]) for c in comments]
+    actual["representative_comments"] = [
+        q for q in actual["representative_comments"]
+        if _norm(q["text"]) and any(_norm(q["text"]) in p for p in pool)
+    ]
+    return actual
+
+
+def _compare(youtube: dict, report: dict | None, volume: dict | None, actual: dict | None) -> dict:
+    out: dict = {}
+    if report and actual and actual.get("listener_score_estimate") is not None:
+        pred = next((a["score"] for a in report["audiences"] if a["audience"] == "국힙 리스너"), None)
+        if pred is not None:
+            out["listener_score"] = {"predicted": pred, "actual": actual["listener_score_estimate"],
+                                     "gap": actual["listener_score_estimate"] - pred}
+    views, days = youtube.get("views"), youtube.get("days_since_upload")
+    if volume and volume.get("available") and views is not None and days is not None:
+        v = volume["views"]
+        if days <= 45:
+            where = "예측 범위 안" if v["low"] <= views <= v["high"] else ("예측보다 많음" if views > v["high"] else "예측보다 적음")
+            out["views"] = {"predicted": v, "actual": views, "days": days, "verdict": where}
+        else:
+            out["views"] = {"predicted": v, "actual": views, "days": days,
+                            "verdict": f"업로드 {days}일 지남 (예측은 첫 한 달 기준이라 직접 비교는 어려움)"}
+    return out
 
 
 def _demo_report(features: dict | None, audio: dict | None = None) -> ReactionReport:

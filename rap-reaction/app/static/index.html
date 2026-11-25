@@ -133,6 +133,22 @@
   .ar dl { margin: 10px 0 0; display: grid; gap: 8px; }
   .ar dt { font-weight: 700; font-size: 13px; }
   .ar dd { margin: 0; font-size: 13px; color: var(--muted); }
+  .yt-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  button.ghost { margin-top: 0; width: auto; padding: 10px 14px; background: var(--chip); color: var(--ink); }
+  .yt-card { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: start; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px; margin-top: 10px; font-size: 13px; }
+  .yt-card img { width: 120px; height: auto; border-radius: 6px; display: block; }
+  .yt-card .t { font-weight: 700; font-size: 14px; line-height: 1.4; }
+  .yt-card .m { color: var(--muted); }
+  .yt-card button { margin-top: 8px; padding: 6px 10px; font-size: 12px; width: auto; }
+  @media (max-width: 420px) { .yt-card { grid-template-columns: 1fr; } .yt-card img { width: 100%; } }
+  .actual { border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 14px; }
+  .actual h2:first-child { margin-top: 0; }
+  .vs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+  .vs div { background: var(--bg); border-radius: 8px; padding: 10px; }
+  .vs .n { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .vs .l { font-size: 12px; color: var(--muted); }
+  .gap-note { font-size: 13px; margin-top: 8px; }
   .privacy { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
   [hidden] { display: none !important; }
   .demo-banner { background: var(--chip); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 16px; }
@@ -152,6 +168,13 @@
         <label for="code">접속 코드</label>
         <input id="code" autocomplete="off" placeholder="운영자에게 받은 코드">
       </div>
+      <label for="yt">유튜브 링크 (선택)</label>
+      <div class="yt-row">
+        <input id="yt" inputmode="url" placeholder="https://www.youtube.com/watch?v=…">
+        <button type="button" id="yt-load" class="ghost">불러오기</button>
+      </div>
+      <div class="hint">이미 공개된 곡이면 링크를 넣어 보세요. 제목·구독자·평소 조회수를 채우고, 실제 댓글로 예측과 실제 반응을 비교합니다. 영상의 소리는 가져오지 않습니다.</div>
+      <div id="yt-preview"></div>
       <label for="title">곡 제목 (선택)</label>
       <input id="title" maxlength="200" placeholder="예: 새벽 세시">
       <label for="level">아티스트 인지도 (선택)</label>
@@ -285,12 +308,63 @@ async function analyzeFile(file, say) {
   return features;
 }
 
+// ---------- 유튜브 링크 불러오기 ----------
+let ytLoaded = null;
+function ytCard(info, withLyricsButton) {
+  if (!info) return null;
+  const n = (x) => x == null ? "-" : fmt(x);
+  const kids = [
+    el("div", { class: "t" }, info.title),
+    el("div", { class: "m" }, `${info.channel}` + (info.subscribers ? ` · 구독자 ${n(info.subscribers)}` : "")),
+    el("div", { class: "m" }, `조회수 ${n(info.views)} · 좋아요 ${n(info.likes)} · 댓글 ${n(info.comment_count)}` +
+      (info.days_since_upload != null ? ` · 업로드 ${info.days_since_upload}일 전` : "")),
+  ];
+  if (info.channel_median_views) kids.push(el("div", { class: "m" }, `채널 최근 영상 조회수 중앙값 ${n(info.channel_median_views)}`));
+  if (withLyricsButton && info.lyrics_in_description) {
+    const b = el("button", { type: "button", class: "ghost" }, "설명란 가사 넣기");
+    b.addEventListener("click", () => { $("#lyrics").value = info.lyrics_in_description; b.remove(); });
+    kids.push(b);
+  }
+  return el("div", { class: "yt-card" },
+    info.thumbnail ? el("img", { src: info.thumbnail, alt: "", loading: "lazy", referrerpolicy: "no-referrer" }) : el("div", {}),
+    el("div", {}, kids));
+}
+
+function authHeaders() {
+  const code = $("#code").value.trim();
+  if (code) store.set("rr-access-code", code);
+  return code ? { "X-Access-Code": code } : {};
+}
+
+$("#yt-load").addEventListener("click", async () => {
+  const url = $("#yt").value.trim();
+  if (!url) return;
+  const btn = $("#yt-load");
+  btn.disabled = true; btn.textContent = "불러오는 중…";
+  try {
+    const res = await fetch("/api/youtube?url=" + encodeURIComponent(url), { headers: authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) { $("#code-wrap").hidden = false; $("#code").focus(); }
+    if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : "영상을 불러오지 못했습니다.");
+    ytLoaded = data;
+    if (!$("#title").value) $("#title").value = data.title;
+    if (!$("#subs").value && data.subscribers) $("#subs").value = data.subscribers;
+    if (!$("#avgviews").value && data.channel_median_views) $("#avgviews").value = data.channel_median_views;
+    fill($("#yt-preview"), ytCard(data, !$("#lyrics").value.trim()));
+  } catch (err) {
+    fill($("#yt-preview"), el("div", { class: "hint error" }, err.message));
+  } finally {
+    btn.disabled = false; btn.textContent = "불러오기";
+  }
+});
+
 $("#form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const file = $("#audio").files[0];
   const lyrics = $("#lyrics").value.trim();
-  if (!file && lyrics.length < 20) {
-    $("#result").replaceChildren(el("div", { class: "empty error" }, "가사(20자 이상)나 음원 중 하나는 넣어 주세요."));
+  const ytUrl = $("#yt").value.trim();
+  if (!file && !ytUrl && lyrics.length < 20) {
+    $("#result").replaceChildren(el("div", { class: "empty error" }, "유튜브 링크, 가사(20자 이상), 음원 중 하나는 넣어 주세요."));
     return;
   }
   const btn = $("#submit");
@@ -299,7 +373,7 @@ $("#form").addEventListener("submit", async (e) => {
   try {
     const audio = file ? await analyzeFile(file, say) : null;
     say("청자 반응을 예측하는 중입니다… (30초~1분)");
-    const body = { lyrics: lyrics || null, audio };
+    const body = { lyrics: lyrics || null, audio, youtube_url: ytUrl || null };
     for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"], ["delivery", "#delivery"]]) body[k] = $(id).value || null;
     const num = (id) => { const v = parseInt($(id).value.replace(/[^0-9]/g, ""), 10); return Number.isFinite(v) && v > 0 ? v : null; };
     body.subscribers = num("#subs");
@@ -443,12 +517,58 @@ function arCard(ar) {
     ar.next_steps.length ? [el("h2", {}, "다음 스텝"), el("ul", {}, ar.next_steps.map(t => el("li", {}, t)))] : null);
 }
 
+function actualCard(data) {
+  const yt = data.youtube, act = data.actual, cmp = data.comparison || {};
+  if (!yt) return null;
+  const parts = [el("h2", {}, "실제 유튜브 반응"), ytCard(yt, false)];
+  if (cmp.listener_score || cmp.views) {
+    parts.push(el("h2", {}, "예측 vs 실제"));
+    const cells = [];
+    if (cmp.listener_score) {
+      const g = cmp.listener_score.gap;
+      cells.push(el("div", {}, el("div", { class: "l" }, "국힙 리스너 점수 (예측 → 실제 댓글)"),
+        el("div", { class: "n" }, `${cmp.listener_score.predicted} → ${cmp.listener_score.actual}`),
+        el("div", { class: "l" }, g === 0 ? "일치" : (g > 0 ? `AI가 ${g}점 낮게 예측` : `AI가 ${-g}점 높게 예측`))));
+    }
+    if (cmp.views) {
+      cells.push(el("div", {}, el("div", { class: "l" }, "조회수 (첫 달 예측 → 현재)"),
+        el("div", { class: "n" }, `${fmt(cmp.views.predicted.mid)} → ${fmt(cmp.views.actual)}`),
+        el("div", { class: "l" }, cmp.views.verdict)));
+    }
+    parts.push(el("div", { class: "vs" }, cells));
+  }
+  if (act) {
+    parts.push(el("p", { class: "gap-note" }, act.summary));
+    if (act.positive_share != null) parts.push(el("p", { class: "ar-sub" }, `인기 댓글 기준 호평 약 ${act.positive_share}% · 혹평 약 ${act.negative_share}% (인기순 상위 댓글이라 호평 쪽으로 치우칠 수 있음)`));
+    if (act.prediction_gap) parts.push(el("div", { class: "warn" }, el("b", {}, "예측이 놓친 점: "), act.prediction_gap));
+    parts.push(el("div", { class: "tags", style: "margin-top:10px" },
+      act.praised.map(t => el("span", { class: "tag good" }, t)),
+      act.criticized.map(t => el("span", { class: "tag bad" }, t))));
+    if (act.representative_comments.length) {
+      parts.push(el("h2", {}, "대표 댓글 (실제)"));
+      parts.push(el("div", { class: "comments" }, act.representative_comments.map(c => el("div", { class: "cmt" },
+        el("div", { class: "cmt-meta" }, el("span", {}, c.why)), el("div", {}, c.text)))));
+    }
+  } else if (yt.fetched_comments === 0) {
+    parts.push(el("p", { class: "ar-sub" }, "댓글을 가져오지 못했습니다 (댓글 사용 중지 영상일 수 있음)."));
+  }
+  return el("div", { class: "actual" }, parts);
+}
+
 function render(data) {
   const r = data.report, f = data.features, a = data.audio;
   const pct = (x) => Math.round(x * 100) + "%";
+  const banner = data.mode === "demo" ? el("div", { class: "demo-banner" }, "데모 결과입니다. 서버에 ANTHROPIC_API_KEY를 설정하면 실제 분석이 실행됩니다.") : null;
+  if (!r) {
+    fill($("#result"), banner,
+      el("p", { class: "ar-sub" }, "가사나 음원이 없어서 예측은 건너뛰고 실제 반응만 분석했습니다. 설명란에 가사가 없으면 가사를 직접 넣어 주세요."),
+      actualCard(data));
+    return;
+  }
   fill($("#result"),
-    data.mode === "demo" ? el("div", { class: "demo-banner" }, "데모 결과입니다. 서버에 ANTHROPIC_API_KEY를 설정하면 실제 분석이 실행됩니다.") : null,
-    el("div", { class: "score-row" },
+    banner,
+    actualCard(data),
+    el("div", { class: "score-row", style: data.youtube ? "margin-top:20px" : "" },
       el("div", { class: "big" }, String(r.overall_score), el("small", {}, " / 100")),
       el("div", {}, el("span", { class: "reach" }, r.reach), el("p", { class: "verdict" }, r.verdict))),
     r.score_weights ? el("div", { class: "weights" },

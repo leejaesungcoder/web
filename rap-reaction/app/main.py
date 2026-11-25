@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import guard
+from . import guard, youtube
 from .analyzer import AnalysisRefused, analyze, has_api_key, key_format_problem
 from .references import dataset_stats
 
@@ -98,6 +98,7 @@ class AnalyzeRequest(BaseModel):
     artist_level: Optional[str] = Field(default=None, max_length=50)
     vibe: Optional[str] = Field(default=None, max_length=500)
     delivery: Optional[str] = Field(default=None, max_length=300)
+    youtube_url: Optional[str] = Field(default=None, max_length=300)
     subscribers: Optional[int] = Field(default=None, ge=0, le=1_000_000_000)
     avg_views: Optional[int] = Field(default=None, ge=0, le=10_000_000_000)
     audio: Optional[AudioFeatures] = None
@@ -121,6 +122,7 @@ def status():
         "live": has_api_key(),
         "key_problem": key_format_problem(),
         "access_required": bool(guard.ACCESS_CODE),
+        "youtube": youtube.available(),
         "dataset": dataset_stats(),
     }
 
@@ -130,13 +132,40 @@ def _clean(value: Optional[str]) -> Optional[str]:
     return value or None
 
 
+@app.get("/api/youtube")
+async def youtube_info(url: str, request: Request):
+    """링크로 영상 정보를 미리 불러와 입력 칸을 채운다. 댓글 원문은 돌려주지 않는다."""
+    guard.check_access(request)
+    guard.check_lookup(request)
+    try:
+        info = await run_in_threadpool(youtube.fetch, url)
+    except youtube.YouTubeError as e:
+        raise HTTPException(400, str(e))
+    keys = ["video_id", "url", "title", "channel", "published_at", "days_since_upload", "thumbnail",
+            "views", "likes", "comment_count", "subscribers", "channel_median_views", "channel_recent_count"]
+    out = {k: info.get(k) for k in keys}
+    out["fetched_comments"] = len(info["comments"])
+    out["lyrics_in_description"] = youtube.lyrics_from_description(info.get("description", ""))
+    return out
+
+
 @app.post("/api/analyze")
 async def analyze_endpoint(req: AnalyzeRequest, request: Request):
     guard.check_access(request)
     lyrics = _clean(req.lyrics)
-    if not req.audio and (not lyrics or len(lyrics) < 20):
-        raise HTTPException(400, "가사(20자 이상)나 음원 중 하나는 넣어 주세요.")
+    yt_url = _clean(req.youtube_url)
+    if not req.audio and not yt_url and (not lyrics or len(lyrics) < 20):
+        raise HTTPException(400, "유튜브 링크, 가사(20자 이상), 음원 중 하나는 넣어 주세요.")
+    if lyrics and len(lyrics) < 20:
+        lyrics = None
     guard.check_rate(request)
+
+    yt = None
+    if yt_url:
+        try:
+            yt = await run_in_threadpool(youtube.fetch, yt_url)
+        except youtube.YouTubeError as e:
+            raise HTTPException(400, str(e))
 
     try:
         async with guard.claude_slot:
@@ -150,6 +179,7 @@ async def analyze_endpoint(req: AnalyzeRequest, request: Request):
                 req.subscribers or None,
                 req.avg_views or None,
                 _clean(req.delivery),
+                yt,
             )
     except AnalysisRefused as e:
         raise HTTPException(422, str(e))
