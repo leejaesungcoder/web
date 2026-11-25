@@ -192,8 +192,35 @@ def _build_user_message(
 
 # ---------- 실행 ----------
 
+def _api_key() -> str | None:
+    """환경 변수의 키. 복사할 때 딸려 온 공백·따옴표·줄바꿈은 지운다."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if key is None:
+        return None
+    return key.strip().strip('"').strip("'").strip() or None
+
+
 def has_api_key() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    return bool(_api_key() or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+
+
+def key_format_problem() -> str | None:
+    """키 값은 드러내지 않고 형식만 검사해서 흔한 실수를 알려준다."""
+    raw = os.environ.get("ANTHROPIC_API_KEY")
+    key = _api_key()
+    if not key:
+        return None
+    if not key.startswith("sk-ant-"):
+        return "API 키는 'sk-ant-'로 시작해야 합니다. console.anthropic.com에서 발급한 API 키인지 확인해 주세요."
+    if key.startswith("sk-ant-admin"):
+        return "관리자(Admin) 키가 들어가 있습니다. 일반 API 키를 넣어 주세요."
+    if any(c.isspace() for c in key):
+        return "API 키 중간에 공백이나 줄바꿈이 들어가 있습니다. 키를 다시 복사해 넣어 주세요."
+    if len(key) < 60:
+        return "API 키가 너무 짧습니다. 일부만 복사된 것 같습니다."
+    if raw != key:
+        return None  # 앞뒤 공백·따옴표는 자동으로 지우고 쓴다
+    return None
 
 
 class AnalysisRefused(Exception):
@@ -231,7 +258,8 @@ def analyze(
         report = _demo_report(features, audio)
         return {"mode": "demo", **common, "report": report.model_dump(), "volume_estimate": with_volume(report)}
 
-    client = anthropic.Anthropic()
+    key = _api_key()
+    client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     user_message = _build_user_message(
         lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views
     )

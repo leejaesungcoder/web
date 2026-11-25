@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 import anthropic
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -17,11 +19,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from . import guard
-from .analyzer import AnalysisRefused, analyze, has_api_key
+from .analyzer import AnalysisRefused, analyze, has_api_key, key_format_problem
 from .references import dataset_stats
 
 STATIC = Path(__file__).resolve().parent / "static"
 TIME = r"^\d{1,2}:\d{2}$"
+
+log = logging.getLogger("rap_reaction")
 
 app = FastAPI(title="Rap Reaction", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -114,6 +118,7 @@ def healthz():
 def status():
     return {
         "live": has_api_key(),
+        "key_problem": key_format_problem(),
         "access_required": bool(guard.ACCESS_CODE),
         "dataset": dataset_stats(),
     }
@@ -146,16 +151,37 @@ async def analyze_endpoint(req: AnalyzeRequest, request: Request):
             )
     except AnalysisRefused as e:
         raise HTTPException(422, str(e))
-    except anthropic.AuthenticationError:
-        raise HTTPException(500, "Claude API 키가 올바르지 않습니다.")
-    except anthropic.RateLimitError:
-        raise HTTPException(429, "요청이 많습니다. 잠시 후 다시 시도해 주세요.")
     except anthropic.APIStatusError as e:
-        raise HTTPException(502, f"Claude API 오류 ({e.status_code})")
+        raise HTTPException(*_explain_api_error(e))
     except anthropic.APIConnectionError:
         raise HTTPException(502, "Claude API에 연결하지 못했습니다.")
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+
+
+def _explain_api_error(e: anthropic.APIStatusError) -> tuple[int, str]:
+    """Claude API 오류를 사용자가 고칠 수 있는 설명으로 바꾼다. 키 값은 절대 넣지 않는다."""
+    msg = (getattr(e, "message", "") or "").lower()
+    log.warning("Claude API error %s (request_id=%s): %s", e.status_code, getattr(e, "request_id", None), msg[:300])
+    if isinstance(e, anthropic.AuthenticationError):
+        hint = key_format_problem()
+        return 500, (
+            "Claude API가 이 키를 거부했습니다 (401). "
+            + (hint + " " if hint else "")
+            + "console.anthropic.com → API Keys에서 키가 살아 있는지 확인하고, 새로 발급한 키를 "
+            "Render의 Environment → ANTHROPIC_API_KEY에 따옴표·공백 없이 다시 넣어 주세요."
+        )
+    if isinstance(e, anthropic.PermissionDeniedError):
+        return 500, "이 API 키로는 요청 권한이 없습니다 (403). 키가 속한 워크스페이스와 조직 상태를 console.anthropic.com에서 확인해 주세요."
+    if isinstance(e, anthropic.NotFoundError):
+        return 500, "이 계정에서 쓸 수 없는 모델입니다 (404). Render의 Environment에 RAP_REACTION_MODEL을 추가해 다른 모델 이름을 넣어 보세요."
+    if isinstance(e, anthropic.RateLimitError):
+        return 429, "요청이 많습니다. 잠시 후 다시 시도해 주세요."
+    if isinstance(e, anthropic.BadRequestError) and ("credit" in msg or "billing" in msg or "balance" in msg):
+        return 402, "Claude API 크레딧이 부족합니다. console.anthropic.com → Billing에서 크레딧을 충전해 주세요."
+    if e.status_code == 529 or e.status_code >= 500:
+        return 503, "Claude API 서버가 일시적으로 바쁩니다. 잠시 후 다시 시도해 주세요."
+    return 502, f"Claude API 오류 ({e.status_code})"
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
