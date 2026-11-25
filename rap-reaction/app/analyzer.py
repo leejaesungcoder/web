@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .lyrics_features import extract_features
 from .references import sample_reference_comments
+from .volume import estimate as estimate_volume
 
 MODEL = os.environ.get("RAP_REACTION_MODEL", "claude-opus-5-5")
 
@@ -43,6 +44,18 @@ class KeyMoment(BaseModel):
     expected_comment: str = Field(description="이 시점을 언급하는 예상 유튜브 댓글. 타임스탬프로 시작 (예: '0:44 여기서 소름')")
 
 
+class ReactionVolume(BaseModel):
+    performance_multiplier: float = Field(
+        description="이 아티스트의 평소 곡 대비 예상 성과 배수. 1.0 = 평소 수준, 0.5 = 절반, 2.0 = 두 배. 0.2~5 사이"
+    )
+    viral_potential: Literal["낮음", "보통", "높음"] = Field(description="평소 팬층을 넘어 퍼질 가능성 (밈, 챌린지, 알고리즘 추천)")
+    comment_intensity: Literal["낮음", "보통", "높음"] = Field(
+        description="조회수 대비 댓글이 얼마나 많이 달릴 곡인지. 논쟁적·공감형·타임스탬프 포인트가 많으면 높음"
+    )
+    up_factors: list[str] = Field(description="성과를 끌어올릴 요인 (구체적으로)")
+    down_factors: list[str] = Field(description="성과를 깎아먹을 요인 (구체적으로)")
+
+
 class ReactionReport(BaseModel):
     overall_score: int = Field(description="종합 반응 잠재력, 0~100")
     reach: Literal["니치", "힙합 코어 팬층", "대중 확산 가능"]
@@ -56,6 +69,7 @@ class ReactionReport(BaseModel):
     risks: list[str] = Field(description="논란·오해 소지 (디스, 혐오 표현, 표절 의심 등). 없으면 빈 배열")
     sound_feedback: list[str] = Field(description="음원 구성(인트로 길이, 훅 타이밍, 비트, 곡 길이)이 유튜브 반응에 미칠 영향. 음원이 없으면 빈 배열")
     key_moments: list[KeyMoment] = Field(description="유튜브 타임스탬프 댓글이 몰릴 순간 2~4개. 음원이 없으면 빈 배열")
+    volume: ReactionVolume = Field(description="반응 규모 판단. 실제 조회수 숫자는 서버가 이 배수로 계산한다")
     caveats: str = Field(description="이 예측의 한계")
 
 
@@ -81,6 +95,12 @@ SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 �
 - 유튜브 반응에 영향을 주는 구조를 본다: 인트로가 길면(15초 이상) 초반 이탈과 "인트로 스킵" 댓글이 늘어난다. 첫 훅이 늦게(1분 이후) 나오면 일반 청자를 잃는다. 훅이 반복되는 횟수와 에너지 차이는 중독성과 관련 있다. 곡 길이가 짧으면(2분대) 반복 재생에 유리하다.
 - 저음 비중이 높고 BPM이 130~160(하프타임 65~80)이면 트랩 계열, 85~100이면서 타악기 비중이 높으면 붐뱁 계열일 가능성이 높다. 단정하지 말고 "~로 보인다"고 말한다. 사용자가 적은 비트 설명이 있으면 그쪽을 우선한다.
 - 유튜브에는 "1:23 여기 미쳤다" 같은 타임스탬프 댓글이 많다. key_moments는 반드시 음원 분석에 나온 실제 시점(구간 시작, 에너지 상승, 훅 후보)에서 고른다. 없는 시점을 지어내지 않는다.
+
+반응 규모(volume) 판단:
+- 조회수의 대부분은 곡이 아니라 아티스트의 기존 팬층이 정한다. 그래서 절대 숫자가 아니라 "이 아티스트가 평소에 내는 곡 대비 몇 배"를 판단한다. 숫자는 서버가 계산하니 조회수를 직접 쓰지 않는다.
+- performance_multiplier는 대부분의 곡이 0.7~1.3이다. 평소보다 확실히 나은 훅·주제·구성이면 1.3~2.0, 2.0을 넘기는 건 밈이 될 구절, 따라 부르기 쉬운 짧은 훅, 화제성 있는 주제(디스, 사회적 이슈, 강한 공감) 같은 뚜렷한 확산 요인이 있을 때만이다. 완성도가 떨어지거나 인트로가 길고 훅이 늦으면 1.0 아래로 준다.
+- overall_score와 일관되게 판단한다. 대략 점수 40 ≈ 0.6배, 50 ≈ 0.9배, 60 ≈ 1.1배, 70 ≈ 1.5배, 80 이상 ≈ 2배 이상을 출발점으로 삼고 근거에 따라 조정한다.
+- up_factors와 down_factors에는 왜 그 배수인지 구체적인 근거(구절, 구간 시점, 곡 길이 등)를 적는다.
 """
 
 
@@ -127,11 +147,15 @@ def _build_user_message(
     features: dict | None,
     references: list[dict],
     audio: dict | None = None,
+    subscribers: int | None = None,
+    avg_views: int | None = None,
 ) -> str:
     parts = ["다음 곡이 공개됐을 때의 청자 반응, 특히 유튜브 댓글 반응을 예측해줘.\n"]
     meta = {
         "곡 제목": title or "(미정)",
         "아티스트 인지도": artist_level or "(미입력)",
+        "유튜브 구독자 수": f"{subscribers:,}명" if subscribers else "(미입력)",
+        "최근 곡 첫 한 달 평균 조회수": f"{avg_views:,}회" if avg_views else "(미입력)",
         "곡 분위기/비트 설명": vibe or "(미입력)",
     }
     parts.append("<곡_정보>\n" + json.dumps(meta, ensure_ascii=False, indent=2) + "\n</곡_정보>\n")
@@ -182,6 +206,8 @@ def analyze(
     artist_level: str | None = None,
     vibe: str | None = None,
     audio: dict | None = None,
+    subscribers: int | None = None,
+    avg_views: int | None = None,
 ) -> dict:
     if not lyrics and not audio:
         raise ValueError("가사나 음원 중 하나는 있어야 합니다.")
@@ -194,12 +220,20 @@ def analyze(
         "reference_count": len(references),
     }
 
+    def with_volume(report: "ReactionReport") -> dict:
+        v = report.volume
+        return estimate_volume(
+            v.performance_multiplier, v.viral_potential, v.comment_intensity,
+            artist_level, subscribers, avg_views,
+        )
+
     if not has_api_key():
-        return {"mode": "demo", **common, "report": _demo_report(features, audio).model_dump()}
+        report = _demo_report(features, audio)
+        return {"mode": "demo", **common, "report": report.model_dump(), "volume_estimate": with_volume(report)}
 
     client = anthropic.Anthropic()
     user_message = _build_user_message(
-        lyrics, title, artist_level, vibe, features, references, audio
+        lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views
     )
 
     # 스트리밍으로 받아 타임아웃을 피하고, 완성된 메시지만 사용한다.
@@ -230,6 +264,7 @@ def analyze(
         "model": message.model,
         **common,
         "report": report.model_dump(),
+        "volume_estimate": with_volume(report),
         "usage": {
             "input_tokens": message.usage.input_tokens,
             "output_tokens": message.usage.output_tokens,
@@ -291,5 +326,12 @@ def _demo_report(features: dict | None, audio: dict | None = None) -> ReactionRe
         risks=[],
         sound_feedback=sound_feedback,
         key_moments=key_moments,
+        volume=ReactionVolume(
+            performance_multiplier=round(0.6 + max(0, base - 40) * 0.03, 2),
+            viral_potential="보통" if has_hook else "낮음",
+            comment_intensity="보통",
+            up_factors=["[데모] 반복되는 훅"] if has_hook else [],
+            down_factors=["[데모] 실제 분석이 아닙니다"],
+        ),
         caveats="데모 모드입니다. ANTHROPIC_API_KEY 환경 변수를 설정하세요.",
     )

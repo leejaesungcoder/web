@@ -103,6 +103,21 @@
   .moment-item .yt { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-top: 4px; }
   details { margin-top: 8px; font-size: 13px; }
   details pre { white-space: pre-wrap; font-family: inherit; color: var(--muted); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 420px) { .row2 { grid-template-columns: 1fr; } }
+  .vol { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 18px; }
+  .vol h2 { margin-top: 0; }
+  .vol-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .vol-grid div { background: var(--surface); border-radius: 8px; padding: 10px; }
+  .vol-grid .n { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .vol-grid .r { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .vol-grid .l { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+  .vol-mult { font-size: 14px; margin: 10px 0 0; }
+  .vol-mult b { color: var(--accent); }
+  .vol-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .factors { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; font-size: 13px; }
+  @media (max-width: 520px) { .factors { grid-template-columns: 1fr; } }
+  .factors h3 { font-size: 13px; margin: 0 0 4px; }
   .privacy { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
   [hidden] { display: none !important; }
   .demo-banner { background: var(--chip); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 16px; }
@@ -132,6 +147,17 @@
         <option>중견 (씬에서 인지도 있음)</option>
         <option>메인스트림</option>
       </select>
+      <div class="row2">
+        <div>
+          <label for="subs">유튜브 구독자 수 (선택)</label>
+          <input id="subs" inputmode="numeric" placeholder="예: 12000">
+        </div>
+        <div>
+          <label for="avgviews">최근 곡 평균 조회수 (선택)</label>
+          <input id="avgviews" inputmode="numeric" placeholder="첫 한 달 기준">
+        </div>
+      </div>
+      <div class="hint">넣으면 예상 조회수·좋아요·댓글 수를 이 숫자 기준으로 계산합니다. 평균 조회수가 가장 정확합니다.</div>
       <label for="vibe">비트 / 분위기 (선택)</label>
       <input id="vibe" maxlength="500" placeholder="예: 붐뱁, 90BPM, 재지한 샘플">
       <label for="audio">음원 파일 (선택)</label>
@@ -256,6 +282,9 @@ $("#form").addEventListener("submit", async (e) => {
     say("청자 반응을 예측하는 중입니다… (30초~1분)");
     const body = { lyrics: lyrics || null, audio };
     for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"]]) body[k] = $(id).value || null;
+    const num = (id) => { const v = parseInt($(id).value.replace(/[^0-9]/g, ""), 10); return Number.isFinite(v) && v > 0 ? v : null; };
+    body.subscribers = num("#subs");
+    body.avg_views = num("#avgviews");
     const code = $("#code").value.trim();
     if (code) store.set("rr-access-code", code);
     const headers = { "Content-Type": "application/json" };
@@ -349,6 +378,35 @@ function audioPanel(a, moments) {
   ];
 }
 
+const fmt = (n) => {
+  if (n >= 1e8) return (n / 1e8).toFixed(n >= 1e9 ? 0 : 1).replace(/\.0$/, "") + "억";
+  if (n >= 1e4) return (n / 1e4).toFixed(n >= 1e5 ? 0 : 1).replace(/\.0$/, "") + "만";
+  return n.toLocaleString();
+};
+
+function volumeCard(est, vol) {
+  if (!est || !vol) return null;
+  const factors = el("div", { class: "factors" },
+    vol.up_factors.length ? el("div", {}, el("h3", { style: "color:var(--good)" }, "끌어올릴 요인"), el("ul", {}, vol.up_factors.map(t => el("li", {}, t)))) : null,
+    vol.down_factors.length ? el("div", {}, el("h3", { style: "color:var(--bad)" }, "깎아먹을 요인"), el("ul", {}, vol.down_factors.map(t => el("li", {}, t)))) : null);
+  const mult = el("p", { class: "vol-mult" }, "평소 곡 대비 ", el("b", {}, `${est.multiplier}배`),
+    ` · 확산 가능성 ${vol.viral_potential} · 댓글 유발도 ${vol.comment_intensity}`);
+  if (!est.available) {
+    return el("div", { class: "vol" }, el("h2", {}, "예상 반응 규모"), mult, el("p", { class: "vol-note" }, est.message), factors);
+  }
+  const cell = (label, v) => el("div", {}, el("div", { class: "l" }, label), el("div", { class: "n" }, fmt(v.mid)),
+    el("div", { class: "r" }, `${fmt(v.low)} ~ ${fmt(v.high)}`));
+  return el("div", { class: "vol" },
+    el("h2", {}, "예상 반응 규모 (공개 후 첫 한 달)"),
+    el("div", { class: "vol-grid" }, cell("조회수", est.views), cell("좋아요", est.likes), cell("댓글", est.comments)),
+    mult,
+    el("p", { class: "vol-note" }, `크게 터지면 조회수 최대 ${fmt(est.viral_views)}회까지 가능`),
+    factors,
+    el("p", { class: "vol-note" },
+      `계산: 기준 ${fmt(est.baseline)}회 (${est.baseline_source}) × ${est.multiplier}배. ` +
+      `좋아요·댓글 비율은 ${est.rate_source}. 홍보, 발매 시기, 피처링, 뮤직비디오 여부에 따라 실제 결과는 크게 달라질 수 있는 대략적인 범위입니다.`));
+}
+
 function render(data) {
   const r = data.report, f = data.features, a = data.audio;
   const pct = (x) => Math.round(x * 100) + "%";
@@ -357,6 +415,8 @@ function render(data) {
     el("div", { class: "score-row" },
       el("div", { class: "big" }, String(r.overall_score), el("small", {}, " / 100")),
       el("div", {}, el("span", { class: "reach" }, r.reach), el("p", { class: "verdict" }, r.verdict))),
+
+    volumeCard(data.volume_estimate, r.volume),
 
     el("h2", {}, "청자층별 반응"),
     r.audiences.map(a => el("div", { class: "aud" },

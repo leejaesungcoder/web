@@ -93,6 +93,8 @@ class AnalyzeRequest(BaseModel):
     title: Optional[str] = Field(default=None, max_length=200)
     artist_level: Optional[str] = Field(default=None, max_length=50)
     vibe: Optional[str] = Field(default=None, max_length=500)
+    subscribers: Optional[int] = Field(default=None, ge=0, le=1_000_000_000)
+    avg_views: Optional[int] = Field(default=None, ge=0, le=10_000_000_000)
     audio: Optional[AudioFeatures] = None
 
 
@@ -139,6 +141,8 @@ async def analyze_endpoint(req: AnalyzeRequest, request: Request):
                 _clean(req.artist_level),
                 _clean(req.vibe),
                 req.audio.to_dict() if req.audio else None,
+                req.subscribers or None,
+                req.avg_views or None,
             )
     except AnalysisRefused as e:
         raise HTTPException(422, str(e))

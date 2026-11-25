@@ -15,7 +15,8 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 def load_comments() -> list[dict]:
     comments: list[dict] = []
-    for path in sorted(DATA_DIR.glob("*.jsonl")):
+    # videos.jsonl(영상 통계)은 댓글이 아니므로 제외한다
+    for path in sorted(DATA_DIR.glob("comments*.jsonl")):
         with path.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
