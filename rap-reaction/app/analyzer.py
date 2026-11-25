@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from .lyrics_features import extract_features
 from .references import sample_reference_comments
+from .taste import prompt_block as taste_block
 from .volume import estimate as estimate_volume
 
 MODEL = os.environ.get("RAP_REACTION_MODEL", "claude-opus-5-5")
@@ -65,6 +66,28 @@ class StyleRead(BaseModel):
     unheard_note: str = Field(description="소리를 듣지 못해 판단하지 못한 부분과, 그 부분에 따라 점수가 어떻게 달라질 수 있는지 한두 문장")
 
 
+class ReferenceMatch(BaseModel):
+    name: str = Field(description="결이 가까운 아티스트 또는 곡. 운영자 레퍼런스에 있으면 그중에서 고른다")
+    why: str = Field(description="어떤 점(플로우, 톤, 프로덕션, 컨셉, 가사 스타일)이 닮았는지")
+
+
+class LabelFit(BaseModel):
+    label: str = Field(description="레이블 목록이 있으면 그중 이름, 없으면 레이블 유형 (예: 트렌디한 트랩 중심 크루형 레이블)")
+    why: str = Field(description="왜 어울리는지")
+
+
+class ArReport(BaseModel):
+    persona: str = Field(description="이 아티스트가 곡에서 보여주는 캐릭터 한두 문장")
+    concept_keywords: list[str] = Field(description="컨셉·세계관·비주얼 키워드 3~6개")
+    ceiling: Literal["언더그라운드 유지", "씬에서 인정받는 수준", "메인스트림 진입 가능", "씬을 대표할 수준"] = Field(
+        description="이 곡에서 보이는 역량으로 갈 수 있는 커리어 상한"
+    )
+    ceiling_reason: str = Field(description="그 상한으로 본 이유와, 한 단계 올라가려면 필요한 것")
+    closest_references: list[ReferenceMatch] = Field(description="결이 가까운 아티스트·곡 1~3개")
+    label_fit: list[LabelFit] = Field(description="어울리는 레이블 1~3개")
+    next_steps: list[str] = Field(description="A&R 관점에서 다음 곡이나 활동에 대한 조언 2~4개")
+
+
 class ReactionReport(BaseModel):
     style_read: StyleRead = Field(description="채점 전에 먼저 판단하는 곡의 스타일과 기준")
     reach: Literal["니치", "힙합 코어 팬층", "대중 확산 가능"]
@@ -79,6 +102,7 @@ class ReactionReport(BaseModel):
     sound_feedback: list[str] = Field(description="음원 구성(인트로 길이, 훅 타이밍, 비트, 곡 길이)이 유튜브 반응에 미칠 영향. 음원이 없으면 빈 배열")
     key_moments: list[KeyMoment] = Field(description="유튜브 타임스탬프 댓글이 몰릴 순간 2~4개. 음원이 없으면 빈 배열")
     volume: ReactionVolume = Field(description="반응 규모 판단. 실제 조회수 숫자는 서버가 이 배수로 계산한다")
+    ar_report: ArReport = Field(description="A&R 관점의 아티스트 평가")
     caveats: str = Field(description="이 예측의 한계")
 
 
@@ -127,6 +151,15 @@ SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 �
 - 유튜브 반응에 영향을 주는 구조를 본다: 인트로가 길면(15초 이상) 초반 이탈과 "인트로 스킵" 댓글이 늘어난다. 첫 훅이 늦게(1분 이후) 나오면 스킵하고 넘어가는 리스너가 늘어난다. 훅이 반복되는 횟수와 에너지 차이는 중독성과 관련 있다. 곡 길이가 짧으면(2분대) 반복 재생에 유리하다.
 - 저음 비중이 높고 BPM이 130~160(하프타임 65~80)이면 트랩 계열, 85~100이면서 타악기 비중이 높으면 붐뱁 계열일 가능성이 높다. 단정하지 말고 "~로 보인다"고 말한다. 사용자가 적은 비트 설명이 있으면 그쪽을 우선한다.
 - 유튜브에는 "1:23 여기 미쳤다" 같은 타임스탬프 댓글이 많다. key_moments는 반드시 음원 분석에 나온 실제 시점(구간 시작, 에너지 상승, 훅 후보)에서 고른다. 없는 시점을 지어내지 않는다.
+
+네임밸류 효과:
+- 리스너는 이미 이름이 있는 아티스트의 곡을 더 좋게 듣는다. 아티스트 인지도가 "중견"이나 "메인스트림"이면 국힙 리스너와 힙합 커뮤니티 점수에 그만큼의 후광을 반영하고, "신인"이면 곡이 좋아도 처음엔 덜 주목받는다는 점을 반영한다. 평론가 점수에는 후광을 거의 반영하지 않는다.
+
+A&R 리포트(ar_report):
+- 레이블에서 신인을 검토하는 A&R의 시각으로 쓴다. 곡의 완성도보다 이 아티스트의 가능성, 캐릭터, 시장에서의 자리를 본다.
+- 운영자 레퍼런스가 주어지면 closest_references는 그 안에서 우선 고르고, 레퍼런스와 비교해 지금 어디쯤인지 ceiling_reason에 적는다.
+- 레이블: 레이블 목록이 주어지면 그 안에서만 고른다. 목록이 없으면 실존 레이블 이름 대신 레이블 유형으로 답한다. 실존 레이블의 계약 성향이나 내부 사정은 지어내지 않는다.
+- ceiling은 냉정하게 매긴다. "씬을 대표할 수준"은 레퍼런스 아티스트들과 견줄 만할 때만 쓴다.
 
 반응 규모(volume) 판단:
 - 조회수의 대부분은 곡이 아니라 아티스트의 기존 팬층이 정한다. 그래서 절대 숫자가 아니라 "이 아티스트가 평소에 내는 곡 대비 몇 배"를 판단한다. 숫자는 서버가 계산하니 조회수를 직접 쓰지 않는다.
@@ -207,6 +240,9 @@ def _build_user_message(
             + json.dumps(features, ensure_ascii=False, indent=2)
             + "\n</가사_정량지표>\n"
         )
+    taste = taste_block()
+    if taste:
+        parts.append(taste)
     if references:
         parts.append(
             "<참고_실제댓글>\n"
@@ -419,6 +455,15 @@ def _demo_report(features: dict | None, audio: dict | None = None) -> ReactionRe
         risks=[],
         sound_feedback=sound_feedback,
         key_moments=key_moments,
+        ar_report=ArReport(
+            persona="[데모] 아티스트 캐릭터 설명",
+            concept_keywords=["[데모] 키워드1", "[데모] 키워드2", "[데모] 키워드3"],
+            ceiling="씬에서 인정받는 수준",
+            ceiling_reason="[데모] 실제 분석에서는 상한 판단 근거가 여기에 적힙니다.",
+            closest_references=[ReferenceMatch(name="[데모] 레퍼런스 아티스트", why="[데모] 닮은 점")],
+            label_fit=[LabelFit(label="[데모] 레이블 유형", why="[데모] 어울리는 이유")],
+            next_steps=["[데모] 다음 곡 조언"],
+        ),
         volume=ReactionVolume(
             performance_multiplier=round(0.6 + max(0, base - 40) * 0.03, 2),
             viral_potential="보통" if has_hook else "낮음",

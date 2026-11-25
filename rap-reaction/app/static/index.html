@@ -122,6 +122,17 @@
   .style-line b { color: var(--ink); }
   .weights { font-size: 12px; color: var(--muted); margin-top: 4px; }
   .warn { border-left: 3px solid var(--accent); background: var(--chip); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-top: 14px; }
+  .ar { border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 14px; }
+  .ar h2:first-child { margin-top: 0; }
+  .ar h2 { margin-top: 18px; }
+  .ar .persona { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+  .ladder { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin: 12px 0 6px; }
+  .ladder div { font-size: 11px; text-align: center; padding: 6px 4px; border-radius: 6px; background: var(--chip); color: var(--muted); line-height: 1.3; }
+  .ladder div.on { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+  .ar-sub { font-size: 13px; color: var(--muted); }
+  .ar dl { margin: 10px 0 0; display: grid; gap: 8px; }
+  .ar dt { font-weight: 700; font-size: 13px; }
+  .ar dd { margin: 0; font-size: 13px; color: var(--muted); }
   .privacy { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
   [hidden] { display: none !important; }
   .demo-banner { background: var(--chip); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 16px; }
@@ -415,6 +426,23 @@ function volumeCard(est, vol) {
       `좋아요·댓글 비율은 ${est.rate_source}. 홍보, 발매 시기, 피처링, 뮤직비디오 여부에 따라 실제 결과는 크게 달라질 수 있는 대략적인 범위입니다.`));
 }
 
+const CEILINGS = ["언더그라운드 유지", "씬에서 인정받는 수준", "메인스트림 진입 가능", "씬을 대표할 수준"];
+
+function arCard(ar) {
+  if (!ar) return null;
+  const pairs = (items, k) => items.map(x => [el("dt", {}, x[k]), el("dd", {}, x.why)]);
+  return el("div", { class: "ar" },
+    el("h2", {}, "A&R 리포트"),
+    el("p", { class: "persona" }, ar.persona),
+    el("div", { class: "tags" }, ar.concept_keywords.map(t => el("span", { class: "tag" }, t))),
+    el("div", { class: "ladder", role: "img", "aria-label": "커리어 상한: " + ar.ceiling },
+      CEILINGS.map(c => el("div", { class: c === ar.ceiling ? "on" : "" }, c))),
+    el("p", { class: "ar-sub" }, ar.ceiling_reason),
+    ar.closest_references.length ? [el("h2", {}, "결이 가까운 아티스트"), el("dl", {}, pairs(ar.closest_references, "name"))] : null,
+    ar.label_fit.length ? [el("h2", {}, "어울리는 레이블"), el("dl", {}, pairs(ar.label_fit, "label"))] : null,
+    ar.next_steps.length ? [el("h2", {}, "다음 스텝"), el("ul", {}, ar.next_steps.map(t => el("li", {}, t)))] : null);
+}
+
 function render(data) {
   const r = data.report, f = data.features, a = data.audio;
   const pct = (x) => Math.round(x * 100) + "%";
@@ -433,6 +461,7 @@ function render(data) {
       r.style_read.delivery_dependence === "높음" ? " AI는 목소리를 듣지 못해서, 이런 곡은 실제보다 낮게 나올 수 있습니다." : "") : null,
 
     volumeCard(data.volume_estimate, r.volume),
+    arCard(r.ar_report),
 
     el("h2", {}, "청자층별 반응"),
     r.audiences.map(a => el("div", { class: "aud" },
