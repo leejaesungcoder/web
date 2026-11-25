@@ -214,6 +214,11 @@ def key_format_problem() -> str | None:
         return "API 키는 'sk-ant-'로 시작해야 합니다. console.anthropic.com에서 발급한 API 키인지 확인해 주세요."
     if key.startswith("sk-ant-admin"):
         return "관리자(Admin) 키가 들어가 있습니다. 일반 API 키를 넣어 주세요."
+    if not key.startswith("sk-ant-api"):
+        return (
+            "Claude API 키가 아닌 다른 종류의 키가 들어가 있습니다. API 키는 'sk-ant-api03-'로 시작합니다. "
+            "console.anthropic.com → API Keys → Create Key로 새로 발급해 주세요."
+        )
     if any(c.isspace() for c in key):
         return "API 키 중간에 공백이나 줄바꿈이 들어가 있습니다. 키를 다시 복사해 넣어 주세요."
     if len(key) < 60:
