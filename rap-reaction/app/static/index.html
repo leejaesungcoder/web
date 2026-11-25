@@ -118,6 +118,10 @@
   .factors { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; font-size: 13px; }
   @media (max-width: 520px) { .factors { grid-template-columns: 1fr; } }
   .factors h3 { font-size: 13px; margin: 0 0 4px; }
+  .style-line { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+  .style-line b { color: var(--ink); }
+  .weights { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .warn { border-left: 3px solid var(--accent); background: var(--chip); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-top: 14px; }
   .privacy { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
   [hidden] { display: none !important; }
   .demo-banner { background: var(--chip); border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 16px; }
@@ -160,6 +164,9 @@
       <div class="hint">넣으면 예상 조회수·좋아요·댓글 수를 이 숫자 기준으로 계산합니다. 평균 조회수가 가장 정확합니다.</div>
       <label for="vibe">비트 / 분위기 (선택)</label>
       <input id="vibe" maxlength="500" placeholder="예: 붐뱁, 90BPM, 재지한 샘플">
+      <label for="delivery">랩 스타일 · 딜리버리 (선택)</label>
+      <input id="delivery" maxlength="300" placeholder="예: 레이드백, 톤 낮고 여유로움, 영어 섞은 멜로디컬 플로우">
+      <div class="hint">AI는 목소리를 듣지 못합니다. 플로우·톤처럼 소리로만 알 수 있는 특징을 적어 주면 점수가 덜 왜곡됩니다.</div>
       <label for="audio">음원 파일 (선택)</label>
       <input id="audio" type="file" accept=".mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm,audio/*">
       <div class="hint">mp3, wav, m4a 등. 넣으면 인트로 길이, 훅 타이밍, 비트 성격까지 반영합니다. 음원만 넣으면 가사 없이 곡 구조만으로 분석합니다.</div>
@@ -282,7 +289,7 @@ $("#form").addEventListener("submit", async (e) => {
     const audio = file ? await analyzeFile(file, say) : null;
     say("청자 반응을 예측하는 중입니다… (30초~1분)");
     const body = { lyrics: lyrics || null, audio };
-    for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"]]) body[k] = $(id).value || null;
+    for (const [k, id] of [["title", "#title"], ["artist_level", "#level"], ["vibe", "#vibe"], ["delivery", "#delivery"]]) body[k] = $(id).value || null;
     const num = (id) => { const v = parseInt($(id).value.replace(/[^0-9]/g, ""), 10); return Number.isFinite(v) && v > 0 ? v : null; };
     body.subscribers = num("#subs");
     body.avg_views = num("#avgviews");
@@ -416,6 +423,14 @@ function render(data) {
     el("div", { class: "score-row" },
       el("div", { class: "big" }, String(r.overall_score), el("small", {}, " / 100")),
       el("div", {}, el("span", { class: "reach" }, r.reach), el("p", { class: "verdict" }, r.verdict))),
+    r.score_weights ? el("div", { class: "weights" },
+      "종합 점수 = " + Object.entries(r.score_weights).map(([k, w]) => `${k} ${Math.round(w * 100)}%`).join(" + ")) : null,
+    r.style_read ? el("p", { class: "style-line" }, "스타일: ", el("b", {}, r.style_read.style),
+      " · 이 스타일 리스너가 보는 것: " + r.style_read.what_fans_value.join(", ")) : null,
+    r.style_read && r.style_read.delivery_dependence !== "낮음" ? el("div", { class: "warn" },
+      el("b", {}, r.style_read.delivery_dependence === "높음" ? "플로우·톤 의존도가 높은 곡입니다. " : "플로우·톤의 영향이 있는 곡입니다. "),
+      r.style_read.unheard_note,
+      r.style_read.delivery_dependence === "높음" ? " AI는 목소리를 듣지 못해서, 이런 곡은 실제보다 낮게 나올 수 있습니다." : "") : null,
 
     volumeCard(data.volume_estimate, r.volume),
 

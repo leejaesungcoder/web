@@ -20,7 +20,7 @@ MODEL = os.environ.get("RAP_REACTION_MODEL", "claude-opus-5-5")
 
 class AudienceReaction(BaseModel):
     audience: Literal["평론가", "힙합 커뮤니티", "국힙 리스너"]
-    score: int = Field(description="이 청자층의 예상 호감도, 0~100")
+    score: int = Field(description="이 청자층이 실제로 줄 평가, 0~100. 시스템 지시의 점수 기준표를 따른다")
     summary: str = Field(description="이 청자층이 보일 반응 요약, 2~3문장")
     likes: list[str] = Field(description="좋아할 지점")
     dislikes: list[str] = Field(description="아쉬워하거나 비판할 지점")
@@ -56,8 +56,17 @@ class ReactionVolume(BaseModel):
     down_factors: list[str] = Field(description="성과를 깎아먹을 요인 (구체적으로)")
 
 
+class StyleRead(BaseModel):
+    style: str = Field(description="이 곡의 스타일을 짧게 (예: 레이드백 스웩 트랩, 리리시즘 붐뱁, 멜로디 랩, 드릴, 감성 서사형)")
+    what_fans_value: list[str] = Field(description="이 스타일을 좋아하는 리스너가 중요하게 보는 것 3~5개")
+    delivery_dependence: Literal["낮음", "보통", "높음"] = Field(
+        description="이 곡의 평가가 가사 내용보다 플로우·톤·딜리버리·그루브(소리로만 판단 가능한 것)에 얼마나 달려 있는지"
+    )
+    unheard_note: str = Field(description="소리를 듣지 못해 판단하지 못한 부분과, 그 부분에 따라 점수가 어떻게 달라질 수 있는지 한두 문장")
+
+
 class ReactionReport(BaseModel):
-    overall_score: int = Field(description="종합 반응 잠재력, 0~100")
+    style_read: StyleRead = Field(description="채점 전에 먼저 판단하는 곡의 스타일과 기준")
     reach: Literal["니치", "힙합 코어 팬층", "대중 확산 가능"]
     verdict: str = Field(description="한 줄 총평")
     audiences: list[AudienceReaction]
@@ -79,13 +88,27 @@ SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 �
 
 세 청자층을 구분해서 생각한다. 세 층 모두 힙합을 좋아해서 이 곡을 찾아 들은 사람들이다. 힙합을 모르는 사람의 교양 있는 감상은 예측하지 않는다.
 - 평론가: 웹진 리뷰어 시각. 주제 의식, 서사, 작법(라임 설계, 플로우를 짐작할 수 있는 음절 배치, 비유), 독창성, 씬에서의 위치를 본다. 진부한 자기과시나 클리셰에 엄격하다.
-- 힙합 커뮤니티: 힙합 커뮤니티에 상주하는 매니아층. 디스코그래피와 씬의 맥락을 꿰고 있다. 라임 개수, 펀치라인, 랩 테크닉을 따지고 다른 래퍼와 비교한다. 칭찬에 인색하고 직설적이며, 아쉬우면 바로 깐다.
+- 힙합 커뮤니티: 힙합 커뮤니티에 상주하는 매니아층. 디스코그래피와 씬의 맥락을 꿰고 있다. 라임, 펀치라인, 랩 테크닉, 스타일의 독창성을 따지고 다른 래퍼와 비교한다. 기준이 높고 직설적이라 아쉬우면 바로 까지만, 잘한 건 확실하게 인정하고 "명곡", "클래식"이라는 말도 아끼지 않는다.
 - 국힙 리스너: 국힙을 꾸준히 듣는 유튜브·스트리밍 리스너. 쇼미더머니를 챙겨 보고, 좋아하는 래퍼 신곡을 바로 찾아 듣고, 플레이리스트에 넣을지를 몇 초 만에 정한다. 분석은 안 하지만 귀는 높다. 플로우가 타는지, 비트가 좋은지, 훅이 꽂히는지, 바이브와 래퍼 캐릭터(스웩, 진정성)가 사는지에 바로 반응하고, 이전 곡이나 비슷한 스타일의 래퍼와 자연스럽게 비교한다.
 
+채점 순서:
+1. style_read를 먼저 정한다. 이 곡이 어떤 스타일인지, 그 스타일을 좋아하는 리스너가 무엇을 중요하게 보는지 적는다.
+2. 각 청자층 점수는 그 스타일의 문법 안에서 매긴다. 스웩·플렉스 트랩을 붐뱁 리리시즘 기준(주제 의식, 서사, 메시지)으로 깎지 않는다. 반복되는 짧은 훅, 단순한 단어, 영어 섞기, 자기과시는 국힙의 흔한 문법이고, 그 자체로는 단점이 아니다. 단점은 그 스타일 안에서 못했을 때만 쓴다.
+3. 소리로만 판단할 수 있는 것(플로우, 톤, 딜리버리, 그루브, 발음 리듬, 보컬 질감)은 감점 근거로 쓰지 않는다. 가사가 종이 위에서 단순해 보여도 딜리버리 중심 곡일 수 있다. 이런 곡은 delivery_dependence를 "높음"으로 하고, 사용자가 적은 랩 스타일 설명과 음원 수치를 근거로 판단하며, 확인이 안 되는 부분은 unheard_note에 적는다.
+4. 점수 기준표 (각 청자층이 실제로 보일 반응):
+   - 90~100: 그 청자층에서 시대의 클래식으로 회자되는 수준
+   - 80~89: 명곡이라는 평이 압도적. 플레이리스트 고정, 몇 년 뒤에도 언급됨
+   - 70~79: 호평 우세. 확실히 잘 만든 곡이라는 반응
+   - 60~69: 괜찮다는 반응이 많지만 호불호가 있음
+   - 50~59: 무난함. 금방 잊힘
+   - 40~49: 아쉽다는 반응이 우세
+   - 40 미만: 혹평
+   평론가와 매니아, 리스너의 점수는 크게 다를 수 있다. 평론가가 낮게 줘도 리스너는 열광하는 곡이 흔하다.
+5. 종합 점수는 서버가 국힙 리스너 50%, 힙합 커뮤니티 30%, 평론가 20%로 계산한다. 종합 점수를 직접 쓰지 않는다.
+
 원칙:
-- 듣기 좋은 말만 하지 않는다. 래퍼가 발매 전에 고칠 수 있게 솔직하게, 구체적인 구절을 인용하며 말한다.
-- 점수는 실제 반응 분포를 생각하고 매긴다. 평범한 곡은 40~60점대다. 80점 이상은 씬에서 화제가 될 수준일 때만 준다.
-- 인기는 아티스트 인지도, 마케팅, 비트, 퍼포먼스에 크게 좌우된다. 가사만 보고 판단한다는 한계를 caveats에 적는다.
+- 솔직하게 말한다는 건 깎는다는 뜻이 아니다. 잘한 곡은 높게, 못한 곡은 낮게 준다. 래퍼가 고칠 수 있게 약점은 구체적인 구절을 인용해 말한다.
+- 인기는 아티스트 인지도, 마케팅, 비트, 퍼포먼스에도 좌우된다. 판단 근거의 한계를 caveats에 적는다.
 - 예상 댓글은 청자층별로 2~4개씩, 호평과 혹평을 섞는다. 국힙 리스너 댓글은 4~6개로 더 많이 쓴다.
 - 참고 댓글이 주어지면 그 어투를 따른다. 참고 댓글 내용을 그대로 베끼지는 않는다.
 
@@ -100,7 +123,7 @@ SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 �
 - 모든 출력은 한국어로 쓴다.
 
 음원 분석 결과가 주어지면:
-- 너는 소리를 직접 듣지 못한다. 신호 처리로 뽑은 수치(BPM, 조성, 저음 비중, 에너지 흐름, 구간 구조)만 보고 추론한다. 보컬 톤, 발음, 믹스 완성도, 플로우의 맛은 판단할 수 없다고 caveats에 적는다.
+- 너는 소리를 직접 듣지 못한다. 신호 처리로 뽑은 수치(BPM, 조성, 저음 비중, 에너지 흐름, 구간 구조)만 보고 추론한다. 보컬 톤, 발음, 믹스 완성도, 플로우의 맛은 판단할 수 없으므로 감점하지 말고 unheard_note에 적는다.
 - 유튜브 반응에 영향을 주는 구조를 본다: 인트로가 길면(15초 이상) 초반 이탈과 "인트로 스킵" 댓글이 늘어난다. 첫 훅이 늦게(1분 이후) 나오면 스킵하고 넘어가는 리스너가 늘어난다. 훅이 반복되는 횟수와 에너지 차이는 중독성과 관련 있다. 곡 길이가 짧으면(2분대) 반복 재생에 유리하다.
 - 저음 비중이 높고 BPM이 130~160(하프타임 65~80)이면 트랩 계열, 85~100이면서 타악기 비중이 높으면 붐뱁 계열일 가능성이 높다. 단정하지 말고 "~로 보인다"고 말한다. 사용자가 적은 비트 설명이 있으면 그쪽을 우선한다.
 - 유튜브에는 "1:23 여기 미쳤다" 같은 타임스탬프 댓글이 많다. key_moments는 반드시 음원 분석에 나온 실제 시점(구간 시작, 에너지 상승, 훅 후보)에서 고른다. 없는 시점을 지어내지 않는다.
@@ -108,7 +131,7 @@ SYSTEM_PROMPT = """너는 한국 힙합 씬을 오래 지켜본 A&R 겸 음악 �
 반응 규모(volume) 판단:
 - 조회수의 대부분은 곡이 아니라 아티스트의 기존 팬층이 정한다. 그래서 절대 숫자가 아니라 "이 아티스트가 평소에 내는 곡 대비 몇 배"를 판단한다. 숫자는 서버가 계산하니 조회수를 직접 쓰지 않는다.
 - performance_multiplier는 대부분의 곡이 0.7~1.3이다. 평소보다 확실히 나은 훅·주제·구성이면 1.3~2.0, 2.0을 넘기는 건 밈이 될 구절, 따라 부르기 쉬운 짧은 훅, 화제성 있는 주제(디스, 사회적 이슈, 강한 공감) 같은 뚜렷한 확산 요인이 있을 때만이다. 완성도가 떨어지거나 인트로가 길고 훅이 늦으면 1.0 아래로 준다.
-- overall_score와 일관되게 판단한다. 대략 점수 40 ≈ 0.6배, 50 ≈ 0.9배, 60 ≈ 1.1배, 70 ≈ 1.5배, 80 이상 ≈ 2배 이상을 출발점으로 삼고 근거에 따라 조정한다.
+- 국힙 리스너 점수와 일관되게 판단한다. 대략 리스너 점수 40 ≈ 0.6배, 50 ≈ 0.9배, 60 ≈ 1.1배, 70 ≈ 1.5배, 80 이상 ≈ 2배 이상을 출발점으로 삼고 근거에 따라 조정한다.
 - up_factors와 down_factors에는 왜 그 배수인지 구체적인 근거(구절, 구간 시점, 곡 길이 등)를 적는다.
 """
 
@@ -158,6 +181,7 @@ def _build_user_message(
     audio: dict | None = None,
     subscribers: int | None = None,
     avg_views: int | None = None,
+    delivery: str | None = None,
 ) -> str:
     parts = ["다음 곡이 공개됐을 때의 청자 반응, 특히 유튜브 댓글 반응을 예측해줘.\n"]
     meta = {
@@ -166,6 +190,7 @@ def _build_user_message(
         "유튜브 구독자 수": f"{subscribers:,}명" if subscribers else "(미입력)",
         "최근 곡 첫 한 달 평균 조회수": f"{avg_views:,}회" if avg_views else "(미입력)",
         "곡 분위기/비트 설명": vibe or "(미입력)",
+        "랩 스타일·딜리버리 설명 (아티스트 본인 설명)": delivery or "(미입력)",
     }
     parts.append("<곡_정보>\n" + json.dumps(meta, ensure_ascii=False, indent=2) + "\n</곡_정보>\n")
     if audio:
@@ -209,6 +234,26 @@ def _api_key() -> str | None:
     return key.strip().strip('"').strip("'").strip() or None
 
 
+AUDIENCE_WEIGHTS = {"국힙 리스너": 0.5, "힙합 커뮤니티": 0.3, "평론가": 0.2}
+
+
+def overall_score(report: "ReactionReport") -> int:
+    """청자층 점수의 가중 평균. 빠진 청자층이 있으면 있는 것끼리 다시 나눈다."""
+    total = weight = 0.0
+    for a in report.audiences:
+        w = AUDIENCE_WEIGHTS.get(a.audience, 0)
+        total += w * max(0, min(100, a.score))
+        weight += w
+    return round(total / weight) if weight else 0
+
+
+def report_dict(report: "ReactionReport") -> dict:
+    d = report.model_dump()
+    d["overall_score"] = overall_score(report)
+    d["score_weights"] = AUDIENCE_WEIGHTS
+    return d
+
+
 def has_api_key() -> bool:
     return bool(_api_key() or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
@@ -249,6 +294,7 @@ def analyze(
     audio: dict | None = None,
     subscribers: int | None = None,
     avg_views: int | None = None,
+    delivery: str | None = None,
 ) -> dict:
     if not lyrics and not audio:
         raise ValueError("가사나 음원 중 하나는 있어야 합니다.")
@@ -270,12 +316,12 @@ def analyze(
 
     if not has_api_key():
         report = _demo_report(features, audio)
-        return {"mode": "demo", **common, "report": report.model_dump(), "volume_estimate": with_volume(report)}
+        return {"mode": "demo", **common, "report": report_dict(report), "volume_estimate": with_volume(report)}
 
     key = _api_key()
     client = anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
     user_message = _build_user_message(
-        lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views
+        lyrics, title, artist_level, vibe, features, references, audio, subscribers, avg_views, delivery
     )
 
     # 스트리밍으로 받아 타임아웃을 피하고, 완성된 메시지만 사용한다.
@@ -305,7 +351,7 @@ def analyze(
         "mode": "live",
         "model": message.model,
         **common,
-        "report": report.model_dump(),
+        "report": report_dict(report),
         "volume_estimate": with_volume(report),
         "usage": {
             "input_tokens": message.usage.input_tokens,
@@ -335,7 +381,12 @@ def _demo_report(features: dict | None, audio: dict | None = None) -> ReactionRe
             ))
 
     return ReactionReport(
-        overall_score=base,
+        style_read=StyleRead(
+            style="[데모] 스타일 판단",
+            what_fans_value=["[데모] 플로우", "[데모] 훅 중독성"],
+            delivery_dependence="보통",
+            unheard_note="[데모] 실제 분석에서는 소리로만 판단할 수 있는 부분이 여기에 적힙니다.",
+        ),
         reach="힙합 코어 팬층",
         verdict="[데모] API 키를 설정하면 실제 분석 결과가 여기에 표시됩니다.",
         audiences=[

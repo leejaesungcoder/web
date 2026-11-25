@@ -1,0 +1,15 @@
+[
+  {
+    "artist": "nafla",
+    "title": "wu",
+    "lyrics_file": "lyrics/nafla_wu.txt",
+    "artist_level": "중견 (씬에서 인지도 있음)",
+    "vibe": "",
+    "delivery": "레이드백, 여유로운 톤, 영어 섞은 그루브 있는 플로우",
+    "expected": {
+      "국힙 리스너": [80, 95],
+      "종합": [75, 92]
+    },
+    "note": "국힙 리스너 사이에서 명곡으로 평가받는 곡 (사용자 제보)"
+  }
+]
